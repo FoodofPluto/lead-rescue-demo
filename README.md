@@ -1,4 +1,4 @@
-# Lead Rescue AI / FollowUpKit for Mobile Detailers
+# Lead Rescue AI / FollowUpKit for Small Businesses
 
 Operator-managed lead form generator for mobile detailers.
 
