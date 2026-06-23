@@ -10,6 +10,9 @@ from typing import Any
 
 from config import Settings
 
+RESEND_API_URL = "https://api.resend.com/emails"
+RESEND_USER_AGENT = "LeadRescueStreamlit/1.0"
+
 
 def profile_owner_email(settings: Settings, profile: dict[str, str] | None = None) -> str:
     if profile and profile.get("owner_email", "").strip():
@@ -134,6 +137,32 @@ def send_resend_email(
     if not settings.resend_api_key:
         return False, "RESEND_API_KEY is missing."
 
+    request = build_resend_request(settings, to_email, subject, body)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if 200 <= response.status < 300:
+                return True, "Email sent with Resend."
+            return False, f"Resend returned status {response.status}."
+    except urllib.error.HTTPError as exc:
+        message = (
+            f"Resend email failed: HTTP {exc.code} {exc.reason}. "
+            "Check verified FROM_EMAIL domain, API key permissions/domain restriction, "
+            "and required request headers."
+        )
+        error_body = safe_resend_error_body(exc, settings)
+        if error_body:
+            message = f"{message} Resend response: {error_body}"
+        return False, message
+    except urllib.error.URLError as exc:
+        return False, f"Resend email failed: {exc}"
+
+
+def build_resend_request(
+    settings: Settings,
+    to_email: str,
+    subject: str,
+    body: str,
+) -> urllib.request.Request:
     payload = json.dumps(
         {
             "from": settings.from_email,
@@ -142,22 +171,39 @@ def send_resend_email(
             "text": body,
         }
     ).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.resend.com/emails",
+    headers = {
+        "Authorization": f"Bearer {settings.resend_api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": RESEND_USER_AGENT,
+    }
+    return urllib.request.Request(
+        RESEND_API_URL,
         data=payload,
-        headers={
-            "Authorization": f"Bearer {settings.resend_api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
+
+
+def safe_resend_error_body(exc: urllib.error.HTTPError, settings: Settings) -> str:
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            if 200 <= response.status < 300:
-                return True, "Email sent with Resend."
-            return False, f"Resend returned status {response.status}."
-    except urllib.error.URLError as exc:
-        return False, f"Resend email failed: {exc}"
+        raw_body = exc.read()
+    except Exception:
+        return ""
+    if not raw_body:
+        return ""
+
+    decoded = raw_body.decode("utf-8", errors="replace").strip()
+    if not decoded:
+        return ""
+
+    secrets = [
+        settings.resend_api_key,
+        f"Bearer {settings.resend_api_key}" if settings.resend_api_key else "",
+    ]
+    if any(secret and secret in decoded for secret in secrets):
+        return ""
+    return decoded[:500]
 
 
 def send_smtp_email(

@@ -1,5 +1,10 @@
+import json
+
 from config import Settings
 from emailer import (
+    RESEND_API_URL,
+    RESEND_USER_AGENT,
+    build_resend_request,
     cta_demo_request_subject,
     customer_lead_request_subject,
     demo_inquiry_body,
@@ -18,6 +23,23 @@ def settings(owner_email="fallback@example.com"):
         email_provider="disabled",
         from_email="Lead Rescue <noreply@example.com>",
         resend_api_key="",
+        smtp_host="",
+        smtp_port=587,
+        smtp_username="",
+        smtp_password="",
+        database_path=":memory:",
+    )
+
+
+def resend_settings():
+    return Settings(
+        app_base_url="http://localhost:8501",
+        app_base_url_configured=True,
+        admin_password="secret",
+        owner_email="owner@example.com",
+        email_provider="resend",
+        from_email="Lead Rescue <leads@verified.example>",
+        resend_api_key="test-api-key",
         smtp_host="",
         smtp_port=587,
         smtp_username="",
@@ -102,3 +124,27 @@ def test_cta_demo_request_email_body_identifies_demo_request():
     assert "New Lead Rescue demo request received." in body
     assert "Morgan Mobile Detail" in body
     assert "I want Lead Rescue for missed calls." in body
+
+
+def test_resend_request_includes_required_headers_and_payload():
+    request = build_resend_request(
+        resend_settings(),
+        "owner@example.com",
+        "New Customer Lead Request",
+        "Lead details",
+    )
+
+    assert request.full_url == RESEND_API_URL
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == "Bearer test-api-key"
+    assert request.get_header("Content-type") == "application/json"
+    assert request.get_header("Accept") == "application/json"
+    assert request.get_header("User-agent") == RESEND_USER_AGENT
+
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload == {
+        "from": "Lead Rescue <leads@verified.example>",
+        "to": ["owner@example.com"],
+        "subject": "New Customer Lead Request",
+        "text": "Lead details",
+    }
