@@ -71,6 +71,7 @@ DEMO_INQUIRIES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS demo_inquiries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
+    submission_type TEXT NOT NULL DEFAULT 'customer_lead',
     name TEXT NOT NULL,
     phone TEXT NOT NULL,
     email TEXT NOT NULL,
@@ -129,6 +130,7 @@ PROFILE_MIGRATIONS = {
 
 DEMO_INQUIRY_MIGRATIONS = {
     "service_type": "ALTER TABLE demo_inquiries ADD COLUMN service_type TEXT NOT NULL DEFAULT ''",
+    "submission_type": "ALTER TABLE demo_inquiries ADD COLUMN submission_type TEXT NOT NULL DEFAULT 'customer_lead'",
 }
 
 
@@ -348,6 +350,7 @@ def init_path_only(db_path: str) -> None:
 def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
     init_path_only(db_path)
     cleaned = {
+        "submission_type": data.get("submission_type", "customer_lead").strip() or "customer_lead",
         "name": data.get("name", "").strip(),
         "phone": data.get("phone", "").strip(),
         "email": data.get("email", "").strip(),
@@ -371,11 +374,12 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
         cursor = conn.execute(
             """
             INSERT INTO demo_inquiries (
-                created_at, name, phone, email, business_name, service_type, message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                created_at, submission_type, name, phone, email, business_name, service_type, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
+                cleaned["submission_type"],
                 cleaned["name"],
                 cleaned["phone"],
                 cleaned["email"],

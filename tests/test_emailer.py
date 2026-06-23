@@ -1,5 +1,12 @@
 from config import Settings
-from emailer import demo_inquiry_body, demo_inquiry_subject, owner_email_body, profile_owner_email
+from emailer import (
+    cta_demo_request_subject,
+    customer_lead_request_subject,
+    demo_inquiry_body,
+    demo_inquiry_subject,
+    owner_email_body,
+    profile_owner_email,
+)
 
 
 def settings(owner_email="fallback@example.com"):
@@ -54,6 +61,7 @@ def test_owner_email_body_includes_business_and_dashboard_link():
 
 def test_demo_inquiry_email_includes_all_submitted_details():
     inquiry = {
+        "submission_type": "customer_lead",
         "name": "Morgan Owner",
         "phone": "555-200-3030",
         "email": "morgan@example.com",
@@ -64,7 +72,10 @@ def test_demo_inquiry_email_includes_all_submitted_details():
     }
     body = demo_inquiry_body(inquiry, "http://localhost:8501?admin=1")
 
-    assert demo_inquiry_subject() == "New Customer Follow-Up Request"
+    assert demo_inquiry_subject() == "New Customer Lead Request"
+    assert customer_lead_request_subject() == "New Customer Lead Request"
+    assert cta_demo_request_subject() == "New Lead Rescue Demo Request"
+    assert "New customer lead request received." in body
     assert "Morgan Owner" in body
     assert "555-200-3030" in body
     assert "morgan@example.com" in body
@@ -72,3 +83,22 @@ def test_demo_inquiry_email_includes_all_submitted_details():
     assert "Estimate" in body
     assert "We need a callback link." in body
     assert "http://localhost:8501?admin=1" in body
+
+
+def test_cta_demo_request_email_body_identifies_demo_request():
+    inquiry = {
+        "submission_type": "cta_demo_request",
+        "name": "Morgan Owner",
+        "phone": "555-200-3030",
+        "email": "morgan@example.com",
+        "business_name": "Morgan Mobile Detail",
+        "service_type": "Mobile detailing",
+        "message": "I want Lead Rescue for missed calls.",
+        "created_at": "2026-06-22T18:00:00+00:00",
+    }
+
+    body = demo_inquiry_body(inquiry)
+
+    assert "New Lead Rescue demo request received." in body
+    assert "Morgan Mobile Detail" in body
+    assert "I want Lead Rescue for missed calls." in body

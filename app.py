@@ -6,7 +6,12 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from config import get_settings
-from emailer import notify_for_demo_inquiry, notify_for_new_lead, send_email
+from emailer import (
+    notify_for_cta_demo_request,
+    notify_for_customer_lead_request,
+    notify_for_new_lead,
+    send_email,
+)
 from lead_logic import (
     CONDITIONS,
     DEFAULT_BUSINESS_PROFILE,
@@ -58,6 +63,17 @@ def public_follow_up_link(settings) -> str:
     return f"{base_url}/?form=lead"
 
 
+def public_contact_link(settings) -> str:
+    base_url = settings.app_base_url.rstrip("/")
+    if not settings.app_base_url_configured:
+        context = getattr(st, "context", None)
+        url = getattr(context, "url", "") if context else ""
+        parsed = urlparse(url) if url else None
+        if parsed and parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{base_url}/?contact=1"
+
+
 def requested_public_slug() -> str:
     slug = st.query_params.get("slug") or st.query_params.get("business")
     if slug:
@@ -71,9 +87,15 @@ def requested_public_slug() -> str:
     return ""
 
 
-def public_route_name(form_value: str | None, admin_value: str | None) -> str:
+def public_route_name(
+    form_value: str | None,
+    admin_value: str | None,
+    contact_value: str | None = None,
+) -> str:
     if admin_value == "1":
         return "operator"
+    if contact_value == "1":
+        return "contact_form"
     if form_value == "lead":
         return "customer_lead_form"
     return "homepage"
@@ -138,14 +160,76 @@ def render_public_landing(settings) -> None:
 
     st.markdown("**How the demo works**")
     st.write(
-        "The Operator configures the customer-facing form, copies the public link, and reviews incoming "
-        "follow-up requests from the operator area."
+        "Lead Rescue includes an editable customer-facing lead form, saved request records, email forwarding, "
+        "and a protected setup area for managing form copy and destinations."
     )
 
-    st.info("Use the example form to see what a customer would receive from a local business.")
-    st.link_button("View Example Lead Form", public_follow_up_link(settings), type="primary")
+    st.link_button("Request a Demo", public_contact_link(settings), type="primary")
+    st.link_button("View Example Customer Form", public_follow_up_link(settings))
 
-    st.caption("Operators can open the setup area with `?admin=1`.")
+
+def render_cta_demo_request_form(settings) -> None:
+    st.title("Request a Lead Rescue Demo")
+    st.write("Tell me about your business and I'll follow up with next steps.")
+
+    if st.session_state.get("cta_demo_request_submitted"):
+        st.success("Thanks - your demo request was sent. I'll follow up soon.")
+        for result in st.session_state.get("cta_demo_request_email_results", []):
+            st.caption(result)
+        if st.button("Send another demo request"):
+            st.session_state.pop("cta_demo_request_submitted", None)
+            st.session_state.pop("cta_demo_request_email_results", None)
+            st.rerun()
+        return
+
+    with st.form("cta_demo_request_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Name *")
+            email = st.text_input("Email *")
+            phone = st.text_input("Phone *")
+        with col2:
+            business_name = st.text_input("Business name *")
+            business_type = st.text_input("Business type or industry")
+        message = st.text_area("What do you want help with?", height=132)
+        submitted = st.form_submit_button("Request Demo", type="primary")
+
+    if not submitted:
+        return
+
+    required = {
+        "Name": name,
+        "Email": email,
+        "Phone": phone,
+        "Business name": business_name,
+        "What do you want help with?": message,
+    }
+    missing = [label for label, value in required.items() if not value.strip()]
+    if missing:
+        st.error("Please complete: " + ", ".join(missing))
+        return
+
+    try:
+        inquiry = create_demo_inquiry(
+            settings.database_path,
+            {
+                "submission_type": "cta_demo_request",
+                "name": name,
+                "phone": phone,
+                "email": email,
+                "business_name": business_name,
+                "service_type": business_type or "Lead Rescue demo",
+                "message": message,
+            },
+        )
+    except Exception as exc:
+        st.error("We could not save your demo request. Please try again.")
+        st.caption(f"Technical detail: {exc}")
+        return
+
+    st.session_state["cta_demo_request_email_results"] = notify_for_cta_demo_request(settings, inquiry)
+    st.session_state["cta_demo_request_submitted"] = True
+    st.rerun()
 
 
 def render_customer_lead_form(settings) -> None:
@@ -212,6 +296,7 @@ def render_customer_lead_form(settings) -> None:
                 "business_name": business_name,
                 "service_type": service_type,
                 "message": message,
+                "submission_type": "customer_lead",
             },
         )
     except Exception as exc:
@@ -219,7 +304,7 @@ def render_customer_lead_form(settings) -> None:
         st.caption(f"Technical detail: {exc}")
         return
 
-    st.session_state["customer_lead_email_results"] = notify_for_demo_inquiry(
+    st.session_state["customer_lead_email_results"] = notify_for_customer_lead_request(
         settings,
         inquiry,
         form_config.get("destination_owner_email", ""),
@@ -836,9 +921,16 @@ def main() -> None:
         render_public_form(settings, get_business_by_slug(settings.database_path, slug))
         return
 
-    route = public_route_name(st.query_params.get("form"), st.query_params.get("admin"))
+    route = public_route_name(
+        st.query_params.get("form"),
+        st.query_params.get("admin"),
+        st.query_params.get("contact"),
+    )
     if route == "customer_lead_form":
         render_customer_lead_form(settings)
+        return
+    if route == "contact_form":
+        render_cta_demo_request_form(settings)
         return
     if route == "homepage":
         render_public_landing(settings)

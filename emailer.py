@@ -78,11 +78,22 @@ def customer_email_subject(profile: dict[str, str] | None = None) -> str:
 
 
 def demo_inquiry_subject() -> str:
-    return "New Customer Follow-Up Request"
+    return customer_lead_request_subject()
+
+
+def customer_lead_request_subject() -> str:
+    return "New Customer Lead Request"
+
+
+def cta_demo_request_subject() -> str:
+    return "New Lead Rescue Demo Request"
 
 
 def demo_inquiry_body(inquiry: dict[str, Any], dashboard_link: str = "") -> str:
-    return f"""New customer follow-up request received.
+    intro = "New customer lead request received."
+    if inquiry.get("submission_type") == "cta_demo_request":
+        intro = "New Lead Rescue demo request received."
+    return f"""{intro}
 
 Name: {inquiry["name"]}
 Phone: {inquiry["phone"]}
@@ -212,6 +223,14 @@ def notify_for_demo_inquiry(
     inquiry: dict[str, Any],
     destination_email: str = "",
 ) -> list[str]:
+    return notify_for_customer_lead_request(settings, inquiry, destination_email)
+
+
+def notify_for_customer_lead_request(
+    settings: Settings,
+    inquiry: dict[str, Any],
+    destination_email: str = "",
+) -> list[str]:
     to_email = destination_email.strip() or settings.owner_email
     if not to_email:
         return ["Follow-up email not sent: OWNER_EMAIL or form destination email is missing."]
@@ -220,10 +239,27 @@ def notify_for_demo_inquiry(
     sent, message = send_email(
         settings,
         to_email,
-        demo_inquiry_subject(),
+        customer_lead_request_subject(),
         demo_inquiry_body(inquiry, f"{settings.app_base_url.rstrip('/')}?admin=1"),
     )
     return [message if sent else f"Follow-up email not sent: {message}"]
+
+
+def notify_for_cta_demo_request(
+    settings: Settings,
+    inquiry: dict[str, Any],
+) -> list[str]:
+    if not settings.owner_email:
+        return ["Demo request email not sent: OWNER_EMAIL is missing."]
+    if not email_enabled_for_recipient(settings, settings.owner_email):
+        return ["Demo request email not sent: email delivery is disabled or not fully configured."]
+    sent, message = send_email(
+        settings,
+        settings.owner_email,
+        cta_demo_request_subject(),
+        demo_inquiry_body(inquiry),
+    )
+    return [message if sent else f"Demo request email not sent: {message}"]
 
 
 def email_enabled_for_recipient(settings: Settings, to_email: str) -> bool:

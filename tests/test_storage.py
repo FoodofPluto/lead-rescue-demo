@@ -54,6 +54,7 @@ def test_create_demo_inquiry_requires_contact_and_business_details(tmp_path):
     )
 
     assert inquiry["id"] > 0
+    assert inquiry["submission_type"] == "customer_lead"
     assert inquiry["business_name"] == "Morgan Mobile Detail"
     assert inquiry["service_type"] == "Callback request"
     assert list_demo_inquiries(db_path, limit=5)[0]["id"] == inquiry["id"]
@@ -89,6 +90,42 @@ def test_create_demo_inquiry_allows_optional_company_name(tmp_path):
 
     assert inquiry["business_name"] == ""
     assert inquiry["service_type"] == "Estimate"
+
+
+def test_demo_request_and_customer_lead_submissions_are_typed(tmp_path):
+    db_path = str(tmp_path / "typed_inquiries.db")
+
+    demo_request = create_demo_inquiry(
+        db_path,
+        {
+            "submission_type": "cta_demo_request",
+            "name": "Morgan Owner",
+            "phone": "555-200-3030",
+            "email": "morgan@example.com",
+            "business_name": "Morgan Mobile Detail",
+            "service_type": "Mobile detailing",
+            "message": "I want Lead Rescue for my business.",
+        },
+    )
+    customer_lead = create_demo_inquiry(
+        db_path,
+        {
+            "submission_type": "customer_lead",
+            "name": "Taylor Customer",
+            "phone": "555-101-2020",
+            "email": "taylor@example.com",
+            "business_name": "",
+            "service_type": "Estimate",
+            "message": "Please call me about service.",
+        },
+    )
+
+    assert demo_request["submission_type"] == "cta_demo_request"
+    assert customer_lead["submission_type"] == "customer_lead"
+    assert {row["submission_type"] for row in list_demo_inquiries(db_path, limit=5)} == {
+        "cta_demo_request",
+        "customer_lead",
+    }
 
 
 def test_form_config_defaults_update_and_reset(tmp_path):
