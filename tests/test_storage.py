@@ -48,12 +48,14 @@ def test_create_demo_inquiry_requires_contact_and_business_details(tmp_path):
             "phone": "555-200-3030",
             "email": "morgan@example.com",
             "business_name": "Morgan Mobile Detail",
+            "service_type": "Callback request",
             "message": "We need one quote link for Facebook and our website.",
         },
     )
 
     assert inquiry["id"] > 0
     assert inquiry["business_name"] == "Morgan Mobile Detail"
+    assert inquiry["service_type"] == "Callback request"
     assert list_demo_inquiries(db_path, limit=5)[0]["id"] == inquiry["id"]
 
     with pytest.raises(ValueError):
@@ -64,17 +66,42 @@ def test_create_demo_inquiry_requires_contact_and_business_details(tmp_path):
                 "phone": "555-200-3030",
                 "email": "morgan@example.com",
                 "business_name": "Morgan Mobile Detail",
+                "service_type": "Callback request",
                 "message": "Missing name should be rejected.",
             },
         )
+
+
+def test_create_demo_inquiry_allows_optional_company_name(tmp_path):
+    db_path = str(tmp_path / "customer_inquiries.db")
+
+    inquiry = create_demo_inquiry(
+        db_path,
+        {
+            "name": "Taylor Customer",
+            "phone": "555-101-2020",
+            "email": "taylor@example.com",
+            "business_name": "",
+            "service_type": "Estimate",
+            "message": "Please call me about service this week.",
+        },
+    )
+
+    assert inquiry["business_name"] == ""
+    assert inquiry["service_type"] == "Estimate"
 
 
 def test_form_config_defaults_update_and_reset(tmp_path):
     db_path = str(tmp_path / "form_config.db")
 
     defaults = get_form_config(db_path)
-    assert defaults["page_title"] == "Lead Rescue"
-    assert defaults["cta_button_text"] == "Request a Follow-Up"
+    assert defaults["business_display_name"] == "Your Business"
+    assert defaults["page_title"] == "Request a Follow-Up"
+    assert defaults["page_description"] == "Tell us what you need and someone from our team will get back to you soon."
+    assert defaults["cta_button_text"] == "Send Request"
+    assert defaults["success_body"] == "Someone from our team will follow up soon."
+    assert "Lead Rescue" not in defaults["page_title"]
+    assert "Lead Rescue" not in defaults["page_description"]
 
     updated = update_form_config(
         db_path,
@@ -92,8 +119,8 @@ def test_form_config_defaults_update_and_reset(tmp_path):
     assert "unknown" not in updated
 
     reset = reset_form_config(db_path)
-    assert reset["page_title"] == "Lead Rescue"
-    assert reset["cta_button_text"] == "Request a Follow-Up"
+    assert reset["page_title"] == "Request a Follow-Up"
+    assert reset["cta_button_text"] == "Send Request"
 
 
 def test_business_profile_slug_generation_and_duplicate_prevention(tmp_path):

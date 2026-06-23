@@ -71,6 +71,14 @@ def requested_public_slug() -> str:
     return ""
 
 
+def public_route_name(form_value: str | None, admin_value: str | None) -> str:
+    if admin_value == "1":
+        return "operator"
+    if form_value == "lead":
+        return "customer_lead_form"
+    return "homepage"
+
+
 def sequence_text(lead: dict[str, Any]) -> str:
     sequence = lead["follow_up_sequence"]
     return "\n\n".join(
@@ -112,52 +120,66 @@ def render_form_unavailable(title: str, message: str) -> None:
 
 
 def render_public_landing(settings) -> None:
-    form_config = get_form_config(settings.database_path)
-    st.title(form_config["page_title"])
-    st.subheader(form_config["page_subtitle"])
-    st.write(form_config["page_description"])
+    st.title("Lead Rescue")
+    st.subheader("A simple follow-up link for small businesses that miss calls, messages, or quote requests.")
+    st.write(
+        "Lead Rescue gives small business owners one shareable form for customers who need a callback, "
+        "quote, booking, or follow-up. Every request is saved so it does not disappear in DMs, voicemail, "
+        "or a busy inbox."
+    )
 
     who_col, why_col = st.columns(2)
     with who_col:
-        st.markdown(f"**{form_config['who_header']}**")
-        st.write(form_config["who_body"])
+        st.markdown("**Who it is for**")
+        st.write("Local service businesses that get leads from missed calls, texts, social messages, website buttons, or Google Business Profile.")
     with why_col:
-        st.markdown(f"**{form_config['problem_header']}**")
-        st.write(form_config["problem_body"])
+        st.markdown("**What it solves**")
+        st.write("Customers get one clear place to ask for help. Owners get a saved request with contact details and context for fast follow-up.")
 
-    st.markdown(f"**{form_config['process_header']}**")
-    st.write(form_config["process_body"])
+    st.markdown("**How the demo works**")
+    st.write(
+        "The Operator configures the customer-facing form, copies the public link, and reviews incoming "
+        "follow-up requests from the operator area."
+    )
 
-    st.info(form_config["value_message"])
+    st.info("Use the example form to see what a customer would receive from a local business.")
+    st.link_button("View Example Lead Form", public_follow_up_link(settings), type="primary")
 
-    if st.session_state.get("demo_inquiry_submitted"):
+    st.caption("Operators can open the setup area with `?admin=1`.")
+
+
+def render_customer_lead_form(settings) -> None:
+    form_config = get_form_config(settings.database_path)
+    st.caption(form_config["business_display_name"])
+    st.title(form_config["page_title"])
+    if form_config.get("page_subtitle"):
+        st.subheader(form_config["page_subtitle"])
+    st.write(form_config["page_description"])
+
+    if st.session_state.get("customer_lead_form_submitted"):
         st.success(form_config["success_title"])
         st.write(form_config["success_body"])
-        for result in st.session_state.get("demo_email_results", []):
+        for result in st.session_state.get("customer_lead_email_results", []):
             st.caption(result)
         if st.button("Send another request"):
-            st.session_state.pop("demo_inquiry_submitted", None)
-            st.session_state.pop("demo_email_results", None)
-            st.session_state["show_demo_inquiry_form"] = True
+            st.session_state.pop("customer_lead_form_submitted", None)
+            st.session_state.pop("customer_lead_email_results", None)
             st.rerun()
         return
 
-    if not st.session_state.get("show_demo_inquiry_form") and st.query_params.get("form") != "lead":
-        if st.button(form_config["cta_button_text"], type="primary"):
-            st.session_state["show_demo_inquiry_form"] = True
-            st.rerun()
-        return
-
-    with st.form("lead_rescue_inquiry_form"):
-        st.markdown(f"**{form_config['form_header']}**")
-        st.caption(form_config["form_help"])
+    with st.form("customer_lead_form"):
+        if form_config.get("form_header") and form_config["form_header"] != form_config["page_title"]:
+            st.markdown(f"**{form_config['form_header']}**")
+        if form_config.get("form_help"):
+            st.caption(form_config["form_help"])
         col1, col2 = st.columns(2)
         with col1:
             name = st.text_input(form_config["name_label"])
             phone = st.text_input(form_config["phone_label"])
             email = st.text_input(form_config["email_label"])
-        with col2:
             business_name = st.text_input(form_config["business_label"])
+        with col2:
+            service_type = st.text_input(form_config["service_label"])
             message = st.text_area(
                 form_config["message_label"],
                 placeholder=form_config["message_placeholder"],
@@ -172,7 +194,7 @@ def render_public_landing(settings) -> None:
         "Name": name,
         "Phone number": phone,
         "Email": email,
-        "Business name": business_name,
+        "Service or request type": service_type,
         "Message": message,
     }
     missing = [label for label, value in fields.items() if not value.strip()]
@@ -188,6 +210,7 @@ def render_public_landing(settings) -> None:
                 "phone": phone,
                 "email": email,
                 "business_name": business_name,
+                "service_type": service_type,
                 "message": message,
             },
         )
@@ -196,12 +219,12 @@ def render_public_landing(settings) -> None:
         st.caption(f"Technical detail: {exc}")
         return
 
-    st.session_state["demo_email_results"] = notify_for_demo_inquiry(
+    st.session_state["customer_lead_email_results"] = notify_for_demo_inquiry(
         settings,
         inquiry,
         form_config.get("destination_owner_email", ""),
     )
-    st.session_state["demo_inquiry_submitted"] = True
+    st.session_state["customer_lead_form_submitted"] = True
     st.rerun()
 
 
@@ -668,17 +691,18 @@ def render_setup_checklist(settings) -> None:
 
 
 def render_lead_form_setup(settings) -> None:
-    st.title("Lead Form Setup")
-    st.write("Edit the public Lead Rescue form, verify email forwarding, and copy the shareable form link.")
+    st.title("Customer Lead Form Setup")
+    st.write("Edit the customer-facing form, verify email forwarding, and copy the shareable form link.")
+    st.caption("This is the form your customers will see when you send them the public link.")
     if not operator_unlocked(settings):
         return
 
     form_config = get_form_config(settings.database_path)
     public_link = public_follow_up_link(settings)
 
-    st.markdown("**Public Lead Form Link**")
-    st.text_input("Copy shareable lead form link", value=public_link, key="public_follow_up_link")
-    st.link_button("Open public form", public_link)
+    st.markdown("**Shareable Customer Form Link**")
+    st.text_input("Copy shareable form link", value=public_link, key="public_follow_up_link")
+    st.link_button("Open customer form", public_link)
     if not settings.app_base_url_configured:
         st.warning("APP_BASE_URL is not set. Set it before deploying so hosted share links use the correct public URL.")
 
@@ -686,8 +710,8 @@ def render_lead_form_setup(settings) -> None:
         "Client posting copy",
         (
             f"Website button: Request a Follow-Up\n\n"
-            f"Instagram bio: Request a callback or quote: {public_link}\n\n"
-            f"Facebook or Google Business Profile: Need a callback, quote, booking, or follow-up? "
+            f"Instagram bio: Need service or a callback? {public_link}\n\n"
+            f"Facebook or Google Business Profile: Need service, a quote, booking help, or a follow-up? "
             f"Send your details here: {public_link}\n\n"
             f"Text reply: Thanks for reaching out. Please send your details here so we can follow up: {public_link}"
         ),
@@ -695,26 +719,16 @@ def render_lead_form_setup(settings) -> None:
         180,
     )
 
-    st.subheader("Edit Public Page and Form")
+    st.subheader("Edit Customer-Facing Form")
     with st.form("lead_form_config"):
-        page_title = st.text_input("Form title/header", value=form_config["page_title"])
+        business_display_name = st.text_input("Business display name", value=form_config["business_display_name"])
+        page_title = st.text_input("Form title", value=form_config["page_title"])
         page_subtitle = st.text_area("Subtitle/description line", value=form_config["page_subtitle"], height=70)
         page_description = st.text_area("Intro paragraph", value=form_config["page_description"], height=90)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            who_header = st.text_input("First section header", value=form_config["who_header"])
-            who_body = st.text_area("First section body", value=form_config["who_body"], height=100)
-            process_header = st.text_input("Process section header", value=form_config["process_header"])
-            process_body = st.text_area("Process section body", value=form_config["process_body"], height=120)
-        with col2:
-            problem_header = st.text_input("Second section header", value=form_config["problem_header"])
-            problem_body = st.text_area("Second section body", value=form_config["problem_body"], height=100)
-            value_message = st.text_area("Value message", value=form_config["value_message"], height=120)
-
-        form_header = st.text_input("Form section header", value=form_config["form_header"])
+        form_header = st.text_input("Form title shown above fields", value=form_config["form_header"])
         form_help = st.text_area("Form helper text", value=form_config["form_help"], height=80)
-        cta_button_text = st.text_input("CTA button text", value=form_config["cta_button_text"])
+        cta_button_text = st.text_input("CTA/button text", value=form_config["cta_button_text"])
 
         label_cols = st.columns(2)
         with label_cols[0]:
@@ -722,7 +736,8 @@ def render_lead_form_setup(settings) -> None:
             phone_label = st.text_input("Phone field label", value=form_config["phone_label"])
             email_label = st.text_input("Email field label", value=form_config["email_label"])
         with label_cols[1]:
-            business_label = st.text_input("Business field label", value=form_config["business_label"])
+            business_label = st.text_input("Company/business field label", value=form_config["business_label"])
+            service_label = st.text_input("Service/request type field label", value=form_config["service_label"])
             message_label = st.text_input("Message field label", value=form_config["message_label"])
             message_placeholder = st.text_input("Message placeholder", value=form_config["message_placeholder"])
 
@@ -739,16 +754,10 @@ def render_lead_form_setup(settings) -> None:
         update_form_config(
             settings.database_path,
             {
+                "business_display_name": business_display_name,
                 "page_title": page_title,
                 "page_subtitle": page_subtitle,
                 "page_description": page_description,
-                "who_header": who_header,
-                "who_body": who_body,
-                "problem_header": problem_header,
-                "problem_body": problem_body,
-                "process_header": process_header,
-                "process_body": process_body,
-                "value_message": value_message,
                 "form_header": form_header,
                 "form_help": form_help,
                 "cta_button_text": cta_button_text,
@@ -756,6 +765,7 @@ def render_lead_form_setup(settings) -> None:
                 "phone_label": phone_label,
                 "email_label": email_label,
                 "business_label": business_label,
+                "service_label": service_label,
                 "message_label": message_label,
                 "message_placeholder": message_placeholder,
                 "success_title": success_title,
@@ -763,12 +773,12 @@ def render_lead_form_setup(settings) -> None:
                 "destination_owner_email": destination_owner_email,
             },
         )
-        st.success("Lead form settings saved.")
+        st.success("Customer lead form settings saved.")
         st.rerun()
 
-    if st.button("Reset lead form copy to defaults"):
+    if st.button("Reset customer lead form copy to defaults"):
         reset_form_config(settings.database_path)
-        st.success("Lead form settings reset.")
+        st.success("Customer lead form settings reset.")
         st.rerun()
 
     st.subheader("Email Test")
@@ -790,7 +800,7 @@ def render_lead_form_setup(settings) -> None:
                 st.warning(message)
 
     recent = list_demo_inquiries(settings.database_path, limit=10)
-    st.subheader("Recent Follow-Up Requests")
+    st.subheader("Recent Customer Follow-Up Requests")
     if recent:
         st.dataframe(recent, use_container_width=True, hide_index=True)
     else:
@@ -803,7 +813,7 @@ def render_sidebar(settings) -> str:
         st.caption("Operator-managed lead form generator")
         page = st.radio(
             "Operator View",
-            ["Lead Form Setup", "Business Profiles", "Detailing Leads", "Pilot Setup Checklist"],
+            ["Customer Lead Form Setup", "Business Profiles", "Detailing Leads", "Pilot Setup Checklist"],
         )
         st.header("Email")
         if settings.email_provider == "disabled":
@@ -826,12 +836,16 @@ def main() -> None:
         render_public_form(settings, get_business_by_slug(settings.database_path, slug))
         return
 
-    if st.query_params.get("admin") != "1":
+    route = public_route_name(st.query_params.get("form"), st.query_params.get("admin"))
+    if route == "customer_lead_form":
+        render_customer_lead_form(settings)
+        return
+    if route == "homepage":
         render_public_landing(settings)
         return
 
     page = render_sidebar(settings)
-    if page == "Lead Form Setup":
+    if page == "Customer Lead Form Setup":
         render_lead_form_setup(settings)
     elif page == "Business Profiles":
         render_business_manager(settings)

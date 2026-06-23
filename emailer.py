@@ -78,16 +78,17 @@ def customer_email_subject(profile: dict[str, str] | None = None) -> str:
 
 
 def demo_inquiry_subject() -> str:
-    return "New Lead Rescue Follow-Up Request"
+    return "New Customer Follow-Up Request"
 
 
 def demo_inquiry_body(inquiry: dict[str, Any], dashboard_link: str = "") -> str:
-    return f"""New Lead Rescue follow-up request received.
+    return f"""New customer follow-up request received.
 
 Name: {inquiry["name"]}
 Phone: {inquiry["phone"]}
 Email: {inquiry["email"]}
-Business name: {inquiry["business_name"]}
+Company/business: {inquiry.get("business_name") or "Not provided"}
+Service/request type: {inquiry.get("service_type", "Not provided")}
 Message:
 {inquiry["message"]}
 

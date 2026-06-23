@@ -58,15 +58,17 @@ def test_demo_inquiry_email_includes_all_submitted_details():
         "phone": "555-200-3030",
         "email": "morgan@example.com",
         "business_name": "Morgan Mobile Detail",
+        "service_type": "Estimate",
         "message": "We need a callback link.",
         "created_at": "2026-06-22T18:00:00+00:00",
     }
     body = demo_inquiry_body(inquiry, "http://localhost:8501?admin=1")
 
-    assert demo_inquiry_subject() == "New Lead Rescue Follow-Up Request"
+    assert demo_inquiry_subject() == "New Customer Follow-Up Request"
     assert "Morgan Owner" in body
     assert "555-200-3030" in body
     assert "morgan@example.com" in body
     assert "Morgan Mobile Detail" in body
+    assert "Estimate" in body
     assert "We need a callback link." in body
     assert "http://localhost:8501?admin=1" in body

@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS demo_inquiries (
     phone TEXT NOT NULL,
     email TEXT NOT NULL,
     business_name TEXT NOT NULL,
+    service_type TEXT NOT NULL DEFAULT '',
     message TEXT NOT NULL
 );
 """
@@ -88,9 +89,10 @@ CREATE TABLE IF NOT EXISTS app_config (
 """
 
 DEFAULT_FORM_CONFIG: dict[str, str] = {
-    "page_title": "Lead Rescue",
-    "page_subtitle": "A simple follow-up link for small businesses that miss calls, messages, or quote requests.",
-    "page_description": "Lead Rescue helps small businesses recover missed opportunities by giving customers one clear place to request a callback, quote, booking, or follow-up.",
+    "business_display_name": "Your Business",
+    "page_title": "Request a Follow-Up",
+    "page_subtitle": "",
+    "page_description": "Tell us what you need and someone from our team will get back to you soon.",
     "who_header": "Who it is for",
     "who_body": "Service businesses that get leads from Facebook, Instagram, Google Business Profile, website buttons, texts, or missed phone calls.",
     "problem_header": "What problem it solves",
@@ -98,17 +100,18 @@ DEFAULT_FORM_CONFIG: dict[str, str] = {
     "process_header": "What happens after a customer submits",
     "process_body": "1. The customer enters their contact details and what they need.\n2. The request is saved so it does not disappear in DMs or voicemail.\n3. The owner can review the lead and follow up.",
     "value_message": "For a business owner, the value is simple: fewer missed opportunities, faster follow-up, and one link they can share anywhere customers already find them.",
-    "form_header": "Request a follow-up",
-    "form_help": "Use this form the way a customer would: leave contact details and a short note about what you need.",
+    "form_header": "Request a Follow-Up",
+    "form_help": "",
     "name_label": "Name *",
     "phone_label": "Phone number *",
     "email_label": "Email *",
-    "business_label": "Business name *",
-    "message_label": "Short message or problem description *",
-    "message_placeholder": "Example: We miss Facebook messages and need one place for customers to request a quote or callback.",
-    "cta_button_text": "Request a Follow-Up",
-    "success_title": "Thanks. Your follow-up request was received.",
-    "success_body": "The request was saved. The next step is to review the details and follow up.",
+    "business_label": "Company name (optional)",
+    "service_label": "Service or request type *",
+    "message_label": "Message *",
+    "message_placeholder": "Tell us what you need help with.",
+    "cta_button_text": "Send Request",
+    "success_title": "Thanks - your request has been sent.",
+    "success_body": "Someone from our team will follow up soon.",
     "destination_owner_email": "",
 }
 
@@ -122,6 +125,10 @@ LEAD_MIGRATIONS = {
 
 PROFILE_MIGRATIONS = {
     "deleted_at": "ALTER TABLE business_profiles ADD COLUMN deleted_at TEXT",
+}
+
+DEMO_INQUIRY_MIGRATIONS = {
+    "service_type": "ALTER TABLE demo_inquiries ADD COLUMN service_type TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -144,6 +151,13 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
     }
     for column, statement in PROFILE_MIGRATIONS.items():
         if column not in profile_existing:
+            conn.execute(statement)
+
+    demo_existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(demo_inquiries)").fetchall()
+    }
+    for column, statement in DEMO_INQUIRY_MIGRATIONS.items():
+        if column not in demo_existing:
             conn.execute(statement)
 
 
@@ -338,9 +352,17 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
         "phone": data.get("phone", "").strip(),
         "email": data.get("email", "").strip(),
         "business_name": data.get("business_name", "").strip(),
+        "service_type": data.get("service_type", "").strip(),
         "message": data.get("message", "").strip(),
     }
-    missing = [label for label, value in cleaned.items() if not value]
+    required = {
+        "name": cleaned["name"],
+        "phone": cleaned["phone"],
+        "email": cleaned["email"],
+        "service_type": cleaned["service_type"],
+        "message": cleaned["message"],
+    }
+    missing = [label for label, value in required.items() if not value]
     if missing:
         raise ValueError("Missing required fields: " + ", ".join(missing))
 
@@ -349,8 +371,8 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
         cursor = conn.execute(
             """
             INSERT INTO demo_inquiries (
-                created_at, name, phone, email, business_name, message
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                created_at, name, phone, email, business_name, service_type, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -358,6 +380,7 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
                 cleaned["phone"],
                 cleaned["email"],
                 cleaned["business_name"],
+                cleaned["service_type"],
                 cleaned["message"],
             ),
         )
