@@ -9,6 +9,7 @@ from lead_logic import (
     DEFAULT_BUSINESS_PROFILE,
     STATUSES,
     generate_next_action,
+    looks_like_email,
     normalized_profile,
     prepare_lead,
     sample_lead_inputs,
@@ -77,7 +78,11 @@ CREATE TABLE IF NOT EXISTS demo_inquiries (
     email TEXT NOT NULL,
     business_name TEXT NOT NULL,
     service_type TEXT NOT NULL DEFAULT '',
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    customer_form_id INTEGER,
+    customer_form_slug TEXT,
+    customer_form_client_name TEXT,
+    destination_email_used TEXT
 );
 """
 
@@ -85,6 +90,41 @@ APP_CONFIG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+CUSTOMER_FORMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS customer_forms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_business_name TEXT NOT NULL,
+    form_slug TEXT NOT NULL UNIQUE,
+    destination_email TEXT NOT NULL,
+    business_display_name TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    page_subtitle TEXT,
+    page_description TEXT NOT NULL,
+    who_header TEXT,
+    who_body TEXT,
+    problem_header TEXT,
+    problem_body TEXT,
+    process_header TEXT,
+    process_body TEXT,
+    value_message TEXT,
+    form_header TEXT NOT NULL,
+    form_help TEXT,
+    name_label TEXT NOT NULL,
+    phone_label TEXT NOT NULL,
+    email_label TEXT NOT NULL,
+    business_label TEXT NOT NULL,
+    service_label TEXT NOT NULL,
+    message_label TEXT NOT NULL,
+    message_placeholder TEXT,
+    cta_button_text TEXT NOT NULL,
+    success_title TEXT NOT NULL,
+    success_body TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 """
@@ -116,6 +156,8 @@ DEFAULT_FORM_CONFIG: dict[str, str] = {
     "destination_owner_email": "",
 }
 
+CUSTOMER_FORM_CONTENT_KEYS = tuple(DEFAULT_FORM_CONFIG.keys())
+
 
 LEAD_MIGRATIONS = {
     "business_id": "ALTER TABLE leads ADD COLUMN business_id INTEGER",
@@ -131,6 +173,10 @@ PROFILE_MIGRATIONS = {
 DEMO_INQUIRY_MIGRATIONS = {
     "service_type": "ALTER TABLE demo_inquiries ADD COLUMN service_type TEXT NOT NULL DEFAULT ''",
     "submission_type": "ALTER TABLE demo_inquiries ADD COLUMN submission_type TEXT NOT NULL DEFAULT 'customer_lead'",
+    "customer_form_id": "ALTER TABLE demo_inquiries ADD COLUMN customer_form_id INTEGER",
+    "customer_form_slug": "ALTER TABLE demo_inquiries ADD COLUMN customer_form_slug TEXT",
+    "customer_form_client_name": "ALTER TABLE demo_inquiries ADD COLUMN customer_form_client_name TEXT",
+    "destination_email_used": "ALTER TABLE demo_inquiries ADD COLUMN destination_email_used TEXT",
 }
 
 
@@ -170,8 +216,10 @@ def init_db(db_path: str) -> None:
         conn.execute(LEADS_SCHEMA)
         conn.execute(DEMO_INQUIRIES_SCHEMA)
         conn.execute(APP_CONFIG_SCHEMA)
+        conn.execute(CUSTOMER_FORMS_SCHEMA)
         ensure_columns(conn)
         conn.commit()
+    migrate_default_customer_form(db_path)
     migrate_single_profile(db_path)
     normalize_existing_slugs(db_path)
     assign_orphan_leads_once(db_path)
@@ -343,12 +391,292 @@ def init_path_only(db_path: str) -> None:
         conn.execute(LEADS_SCHEMA)
         conn.execute(DEMO_INQUIRIES_SCHEMA)
         conn.execute(APP_CONFIG_SCHEMA)
+        conn.execute(CUSTOMER_FORMS_SCHEMA)
         ensure_columns(conn)
         conn.commit()
 
 
-def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
+def read_app_form_config(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute("SELECT key, value FROM app_config").fetchall()
+    saved = {row["key"]: row["value"] for row in rows}
+    config = DEFAULT_FORM_CONFIG.copy()
+    for key, default in DEFAULT_FORM_CONFIG.items():
+        value = str(saved.get(key, "")).strip()
+        config[key] = value if value else default
+    return config
+
+
+def customer_form_values(
+    form: dict[str, Any],
+    created_at: str,
+    updated_at: str,
+) -> tuple[Any, ...]:
+    content = DEFAULT_FORM_CONFIG.copy()
+    content.update({key: str(form.get(key, content[key]) or "").strip() for key in CUSTOMER_FORM_CONTENT_KEYS})
+    return (
+        str(form["client_business_name"]).strip(),
+        slugify(str(form["form_slug"])),
+        str(form["destination_email"]).strip(),
+        content["business_display_name"],
+        content["page_title"],
+        content["page_subtitle"],
+        content["page_description"],
+        content["who_header"],
+        content["who_body"],
+        content["problem_header"],
+        content["problem_body"],
+        content["process_header"],
+        content["process_body"],
+        content["value_message"],
+        content["form_header"],
+        content["form_help"],
+        content["name_label"],
+        content["phone_label"],
+        content["email_label"],
+        content["business_label"],
+        content["service_label"],
+        content["message_label"],
+        content["message_placeholder"],
+        content["cta_button_text"],
+        content["success_title"],
+        content["success_body"],
+        int(bool(form.get("is_active", True))),
+        created_at,
+        updated_at,
+    )
+
+
+def row_to_customer_form(row: sqlite3.Row) -> dict[str, Any]:
+    form = dict(row)
+    form["is_active"] = bool(form["is_active"])
+    return form
+
+
+def customer_form_slug_exists(
+    db_path: str,
+    slug: str,
+    exclude_id: int | None = None,
+) -> bool:
+    sql = "SELECT id FROM customer_forms WHERE form_slug = ?"
+    params: list[Any] = [slugify(slug)]
+    if exclude_id is not None:
+        sql += " AND id != ?"
+        params.append(exclude_id)
+    with connect(db_path) as conn:
+        return conn.execute(sql, params).fetchone() is not None
+
+
+def unique_customer_form_slug(
+    db_path: str,
+    desired_slug: str,
+    exclude_id: int | None = None,
+) -> str:
+    base = slugify(desired_slug)
+    slug = base
+    suffix = 2
+    while customer_form_slug_exists(db_path, slug, exclude_id=exclude_id):
+        slug = f"{base}-{suffix}"
+        suffix += 1
+    return slug
+
+
+def validate_customer_form(
+    db_path: str,
+    form: dict[str, Any],
+    form_id: int | None = None,
+    allow_slug_autonumber: bool = True,
+) -> dict[str, Any]:
+    client_business_name = str(form.get("client_business_name", "")).strip()
+    if not client_business_name:
+        raise ValueError("Client/business name is required.")
+
+    destination_email = str(form.get("destination_email", "")).strip()
+    if not destination_email:
+        raise ValueError("Destination email is required.")
+    if not looks_like_email(destination_email):
+        raise ValueError("Destination email must be a valid email address.")
+
+    raw_slug = str(form.get("form_slug", "") or client_business_name).strip()
+    clean_slug = slugify(raw_slug)
+    if not clean_slug:
+        raise ValueError("Form slug is required.")
+    if customer_form_slug_exists(db_path, clean_slug, exclude_id=form_id):
+        if allow_slug_autonumber and form_id is None:
+            clean_slug = unique_customer_form_slug(db_path, clean_slug)
+        else:
+            raise ValueError(f"Form slug `{clean_slug}` is already in use.")
+
+    cleaned = {**DEFAULT_FORM_CONFIG, **form}
+    cleaned["client_business_name"] = client_business_name
+    cleaned["form_slug"] = clean_slug
+    cleaned["destination_email"] = destination_email
+    cleaned["business_display_name"] = str(
+        cleaned.get("business_display_name") or client_business_name
+    ).strip()
+    for key in CUSTOMER_FORM_CONTENT_KEYS:
+        if not str(cleaned.get(key, "")).strip():
+            cleaned[key] = DEFAULT_FORM_CONFIG[key]
+    cleaned["is_active"] = bool(cleaned.get("is_active", True))
+    return cleaned
+
+
+def migrate_default_customer_form(db_path: str) -> None:
+    with connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM customer_forms").fetchone()[0]
+        if count:
+            return
+        config = read_app_form_config(conn)
+        destination = config.get("destination_owner_email", "").strip()
+        if not destination or not looks_like_email(destination):
+            return
+        now = utc_now_iso()
+        form = validate_customer_form(
+            db_path,
+            {
+                **config,
+                "client_business_name": config.get("business_display_name") or "Default Customer Form",
+                "form_slug": slugify(config.get("business_display_name") or "default"),
+                "destination_email": destination,
+                "is_active": True,
+            },
+        )
+        conn.execute(
+            """
+            INSERT INTO customer_forms (
+                client_business_name, form_slug, destination_email,
+                business_display_name, page_title, page_subtitle, page_description,
+                who_header, who_body, problem_header, problem_body, process_header,
+                process_body, value_message, form_header, form_help, name_label,
+                phone_label, email_label, business_label, service_label, message_label,
+                message_placeholder, cta_button_text, success_title, success_body,
+                is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            customer_form_values(form, now, now),
+        )
+        conn.commit()
+
+
+def create_customer_form(db_path: str, form: dict[str, Any]) -> dict[str, Any]:
     init_path_only(db_path)
+    cleaned = validate_customer_form(db_path, form)
+    now = utc_now_iso()
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO customer_forms (
+                client_business_name, form_slug, destination_email,
+                business_display_name, page_title, page_subtitle, page_description,
+                who_header, who_body, problem_header, problem_body, process_header,
+                process_body, value_message, form_header, form_help, name_label,
+                phone_label, email_label, business_label, service_label, message_label,
+                message_placeholder, cta_button_text, success_title, success_body,
+                is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            customer_form_values(cleaned, now, now),
+        )
+        conn.commit()
+        form_id = int(cursor.lastrowid)
+    return get_customer_form(db_path, form_id)
+
+
+def update_customer_form(
+    db_path: str,
+    form_id: int,
+    form: dict[str, Any],
+) -> dict[str, Any]:
+    init_path_only(db_path)
+    current = get_customer_form(db_path, form_id)
+    if current is None:
+        raise ValueError(f"Customer form {form_id} was not found.")
+    cleaned = validate_customer_form(
+        db_path,
+        {**current, **form},
+        form_id=form_id,
+        allow_slug_autonumber=False,
+    )
+    now = utc_now_iso()
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE customer_forms SET
+                client_business_name = ?, form_slug = ?, destination_email = ?,
+                business_display_name = ?, page_title = ?, page_subtitle = ?,
+                page_description = ?, who_header = ?, who_body = ?,
+                problem_header = ?, problem_body = ?, process_header = ?,
+                process_body = ?, value_message = ?, form_header = ?,
+                form_help = ?, name_label = ?, phone_label = ?, email_label = ?,
+                business_label = ?, service_label = ?, message_label = ?,
+                message_placeholder = ?, cta_button_text = ?, success_title = ?,
+                success_body = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            customer_form_values(cleaned, current["created_at"], now)[:-2]
+            + (now, form_id),
+        )
+        conn.commit()
+    return get_customer_form(db_path, form_id)
+
+
+def list_customer_forms(db_path: str) -> list[dict[str, Any]]:
+    init_db(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM customer_forms ORDER BY datetime(updated_at) DESC, id DESC"
+        ).fetchall()
+    return [row_to_customer_form(row) for row in rows]
+
+
+def get_customer_form(db_path: str, form_id: int) -> dict[str, Any] | None:
+    init_db(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM customer_forms WHERE id = ?",
+            (form_id,),
+        ).fetchone()
+    return row_to_customer_form(row) if row else None
+
+
+def get_customer_form_by_slug(
+    db_path: str,
+    slug: str,
+    include_inactive: bool = False,
+) -> dict[str, Any] | None:
+    init_db(db_path)
+    sql = "SELECT * FROM customer_forms WHERE form_slug = ?"
+    if not include_inactive:
+        sql += " AND is_active = 1"
+    with connect(db_path) as conn:
+        row = conn.execute(sql, (slugify(slug),)).fetchone()
+    return row_to_customer_form(row) if row else None
+
+
+def get_default_customer_form_config(db_path: str) -> dict[str, Any]:
+    init_path_only(db_path)
+    config = get_form_config(db_path)
+    return {
+        **config,
+        "id": None,
+        "form_slug": "lead",
+        "client_business_name": "Default",
+        "destination_email": config.get("destination_owner_email", ""),
+        "is_active": True,
+    }
+
+
+def archive_customer_form(db_path: str, form_id: int) -> dict[str, Any]:
+    return update_customer_form(db_path, form_id, {"is_active": False})
+
+
+def create_demo_inquiry(db_path: str, data: dict[str, Any]) -> dict[str, Any]:
+    init_path_only(db_path)
+    raw_customer_form_id = data.get("customer_form_id")
+    customer_form_id = (
+        int(raw_customer_form_id)
+        if raw_customer_form_id not in {None, "", "None"}
+        else None
+    )
     cleaned = {
         "submission_type": data.get("submission_type", "customer_lead").strip() or "customer_lead",
         "name": data.get("name", "").strip(),
@@ -357,6 +685,12 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
         "business_name": data.get("business_name", "").strip(),
         "service_type": data.get("service_type", "").strip(),
         "message": data.get("message", "").strip(),
+        "customer_form_id": customer_form_id,
+        "customer_form_slug": str(data.get("customer_form_slug", "") or "").strip(),
+        "customer_form_client_name": str(
+            data.get("customer_form_client_name", "") or ""
+        ).strip(),
+        "destination_email_used": str(data.get("destination_email_used", "") or "").strip(),
     }
     required = {
         "name": cleaned["name"],
@@ -374,8 +708,10 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
         cursor = conn.execute(
             """
             INSERT INTO demo_inquiries (
-                created_at, submission_type, name, phone, email, business_name, service_type, message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, submission_type, name, phone, email, business_name,
+                service_type, message, customer_form_id, customer_form_slug,
+                customer_form_client_name, destination_email_used
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -386,6 +722,10 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
                 cleaned["business_name"],
                 cleaned["service_type"],
                 cleaned["message"],
+                cleaned["customer_form_id"],
+                cleaned["customer_form_slug"],
+                cleaned["customer_form_client_name"],
+                cleaned["destination_email_used"],
             ),
         )
         conn.commit()
@@ -393,30 +733,44 @@ def create_demo_inquiry(db_path: str, data: dict[str, str]) -> dict[str, Any]:
     return {**cleaned, "id": inquiry_id, "created_at": created_at}
 
 
-def list_demo_inquiries(db_path: str, limit: int = 20) -> list[dict[str, Any]]:
+def row_to_demo_inquiry(row: sqlite3.Row) -> dict[str, Any]:
+    inquiry = dict(row)
+    inquiry.setdefault("customer_form_id", None)
+    inquiry.setdefault("customer_form_slug", "")
+    inquiry.setdefault("customer_form_client_name", "")
+    inquiry.setdefault("destination_email_used", "")
+    return inquiry
+
+
+def list_demo_inquiries(
+    db_path: str,
+    limit: int = 20,
+    customer_form_slug: str | None = None,
+) -> list[dict[str, Any]]:
     init_path_only(db_path)
+    params: list[Any] = []
+    where = ""
+    if customer_form_slug:
+        where = "WHERE customer_form_slug = ?"
+        params.append(slugify(customer_form_slug))
+    params.append(limit)
     with connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM demo_inquiries
+            {where}
             ORDER BY datetime(created_at) DESC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [row_to_demo_inquiry(row) for row in rows]
 
 
 def get_form_config(db_path: str) -> dict[str, str]:
     init_path_only(db_path)
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT key, value FROM app_config").fetchall()
-    saved = {row["key"]: row["value"] for row in rows}
-    config = DEFAULT_FORM_CONFIG.copy()
-    for key, default in DEFAULT_FORM_CONFIG.items():
-        value = str(saved.get(key, "")).strip()
-        config[key] = value if value else default
-    return config
+        return read_app_form_config(conn)
 
 
 def update_form_config(db_path: str, values: dict[str, str]) -> dict[str, str]:

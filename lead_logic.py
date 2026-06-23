@@ -60,6 +60,10 @@ def slugify(value: str) -> str:
     return slug or "mobile-detailer"
 
 
+def looks_like_email(value: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value.strip()))
+
+
 def score_lead(data: dict[str, str]) -> int:
     score = 35
 

@@ -68,6 +68,7 @@ APP_BASE_URL=http://localhost:8501
 DATABASE_PATH=leads.db
 ADMIN_PASSWORD=change-me
 OWNER_EMAIL=owner@example.com
+DEFAULT_DESTINATION_EMAIL=owner@example.com
 FROM_EMAIL=Lead Rescue AI <noreply@example.com>
 EMAIL_PROVIDER=disabled
 RESEND_API_KEY=
@@ -77,7 +78,7 @@ SMTP_USERNAME=
 SMTP_PASSWORD=
 ```
 
-`OWNER_EMAIL` receives public Lead Rescue follow-up requests unless the destination email is overridden in **Lead Form Setup**. For business profile quote forms, owner notifications route to the `owner_email` stored on the matching business profile first and fall back to `OWNER_EMAIL`.
+`OWNER_EMAIL` receives demo requests and can be used as a legacy fallback. `DEFAULT_DESTINATION_EMAIL` is also accepted as the fallback email when `OWNER_EMAIL` is not set. Customer lead forms created in **Customer Lead Form Setup** each have their own required destination email, and public submissions route to the destination saved on the matching form. For business profile quote forms, owner notifications route to the `owner_email` stored on the matching business profile first and fall back to `OWNER_EMAIL`.
 
 `ADMIN_PASSWORD` is required to open the operator area. If it is missing, public pages still work but dashboard/profile pages remain locked.
 
@@ -88,6 +89,7 @@ APP_BASE_URL = "https://your-app.streamlit.app"
 DATABASE_PATH = "leads.db"
 ADMIN_PASSWORD = "choose-a-private-password"
 OWNER_EMAIL = "you@example.com"
+DEFAULT_DESTINATION_EMAIL = "you@example.com"
 FROM_EMAIL = "Lead Rescue <onboarding@resend.dev>"
 EMAIL_PROVIDER = "disabled"
 RESEND_API_KEY = ""
@@ -96,6 +98,24 @@ SMTP_PORT = "587"
 SMTP_USERNAME = ""
 SMTP_PASSWORD = ""
 ```
+
+## Demo Deployment Checklist
+
+Before sharing a public demo link, set these secrets or environment variables:
+
+- `ADMIN_PASSWORD`: required for the protected Operator area.
+- `APP_BASE_URL`: the deployed Streamlit URL, used for generated share links.
+- `RESEND_API_KEY`: required when `EMAIL_PROVIDER=resend`.
+- `FROM_EMAIL`: verified sender address for Resend or SMTP.
+- `DEFAULT_DESTINATION_EMAIL`: fallback destination for demo/default requests when `OWNER_EMAIL` is not set.
+
+Manual smoke test:
+
+1. Open `https://your-app-url/?form=lead`, submit the default public CTA form, and confirm it saves without needing Operator login.
+2. Log in at `https://your-app-url?admin=1`, create a customer form, copy its generated `/?form=client-slug` link, open it in a private window, and confirm the edited content appears.
+3. Confirm `?admin=1` requires `ADMIN_PASSWORD`, then use **Log out Operator** and confirm the Operator area locks again.
+4. Submit a test lead from the generated customer form and confirm email delivery reaches that form's destination email.
+5. Return to **Customer Lead Form Setup**, confirm the recent request shows client/form attribution, and download **Export recent requests CSV**.
 
 ## Create A Business Profile
 
@@ -149,20 +169,27 @@ Use the link in:
 - Text message replies
 - QR code later
 
-## Public Lead Rescue Form
+## Customer Lead Forms
 
-The main public form is available at:
+The legacy/default public form is available at:
 
 ```text
 http://localhost:8501/?form=lead
 ```
 
-Open `http://localhost:8501?admin=1`, enter the operator password, then use **Lead Form Setup** to:
+Client-specific customer forms use URL-safe slugs:
 
-- Edit the public page copy, section headers, field labels, CTA button, thank-you message, and destination email.
-- Copy the public Lead Rescue form link.
-- Send a test email to verify email forwarding.
-- Review recent public follow-up requests.
+```text
+http://localhost:8501/?form=abc-plumbing
+```
+
+Open `http://localhost:8501?admin=1`, enter the operator password, then use **Customer Lead Form Setup** to:
+
+- Create a saved lead form record for each client/business.
+- Edit page copy, section headers, field labels, CTA button, thank-you message, active status, slug, and destination email.
+- Copy each form's unique shareable URL.
+- Send a test email to the selected form destination.
+- Review recent customer follow-up requests with client/form attribution and destination email used.
 
 If `APP_BASE_URL` is set, the share link uses that hosted URL. If it is missing, the app tries to infer the current Streamlit URL and warns you to set `APP_BASE_URL` before deployment.
 
@@ -195,7 +222,7 @@ There is no separate frontend build, backend service, or serverless/API route to
 6. Set `ADMIN_PASSWORD` before sharing the hosted operator area.
 7. Deploy the app.
 
-The generated Streamlit app URL is the public demo link. Use `https://your-app-url?admin=1` for setup and `https://your-app-url/quote/client-slug` for the client-shareable quote form.
+The generated Streamlit app URL is the public demo link. Use `https://your-app-url?admin=1` for setup, `https://your-app-url/?form=client-slug` for customer lead forms, and `https://your-app-url/quote/client-slug` for the mobile-detailing quote form workflow.
 
 SQLite is enough for a short demo, but hosted Streamlit storage may reset when the app is rebuilt or redeployed. For a production pilot, connect a persistent database and update `DATABASE_PATH` or replace the storage layer.
 
@@ -310,7 +337,7 @@ FROM_EMAIL=...
 
 Owner email includes business name, customer details, lead score, owner summary, next recommended action, suggested next message, and dashboard link.
 
-Public Lead Rescue form emails use the subject `New Lead Rescue Follow-Up Request` and include name, phone, email, business name, message, created time, and operator dashboard link.
+Customer lead form emails use the subject `New Customer Lead Request` and include name, phone, email, business name, service/request type, message, client/form attribution when available, destination email used, created time, and operator dashboard link.
 
 To test email forwarding without submitting a real lead, open **Lead Form Setup** and click **Send Test Email**. If email delivery is disabled or credentials are missing, the app shows a warning but form submissions still save.
 

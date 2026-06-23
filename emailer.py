@@ -9,6 +9,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from config import Settings
+from lead_logic import looks_like_email
 
 RESEND_API_URL = "https://api.resend.com/emails"
 RESEND_USER_AGENT = "LeadRescueStreamlit/1.0"
@@ -96,6 +97,13 @@ def demo_inquiry_body(inquiry: dict[str, Any], dashboard_link: str = "") -> str:
     intro = "New customer lead request received."
     if inquiry.get("submission_type") == "cta_demo_request":
         intro = "New Lead Rescue demo request received."
+    form_context = ""
+    if inquiry.get("customer_form_slug") or inquiry.get("customer_form_client_name"):
+        form_context = f"""
+Lead form client: {inquiry.get("customer_form_client_name") or "Unknown"}
+Lead form slug: {inquiry.get("customer_form_slug") or "Unknown"}
+Destination email used: {inquiry.get("destination_email_used") or "Not recorded"}
+"""
     return f"""{intro}
 
 Name: {inquiry["name"]}
@@ -105,6 +113,7 @@ Company/business: {inquiry.get("business_name") or "Not provided"}
 Service/request type: {inquiry.get("service_type", "Not provided")}
 Message:
 {inquiry["message"]}
+{form_context}
 
 Created: {inquiry.get("created_at", "Not recorded")}
 
@@ -277,9 +286,11 @@ def notify_for_customer_lead_request(
     inquiry: dict[str, Any],
     destination_email: str = "",
 ) -> list[str]:
-    to_email = destination_email.strip() or settings.owner_email
+    to_email = destination_email.strip()
     if not to_email:
-        return ["Follow-up email not sent: OWNER_EMAIL or form destination email is missing."]
+        return ["Follow-up email not sent: form destination email is missing."]
+    if not looks_like_email(to_email):
+        return ["Follow-up email not sent: form destination email is invalid."]
     if not email_enabled_for_recipient(settings, to_email):
         return ["Follow-up email not sent: email delivery is disabled or not fully configured."]
     sent, message = send_email(

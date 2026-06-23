@@ -1,20 +1,29 @@
+import sqlite3
+
 import pytest
 
 from storage import (
+    archive_customer_form,
     create_business_profile,
+    create_customer_form,
     create_demo_inquiry,
     create_lead,
+    get_customer_form_by_slug,
+    get_default_customer_form_config,
     get_form_config,
     get_business_by_slug,
     get_business_profile,
     get_lead,
     list_demo_inquiries,
+    list_customer_forms,
     list_business_profiles,
     list_leads,
     reset_sample_data,
     reset_form_config,
     restore_business_profile,
     soft_delete_business_profile,
+    unique_customer_form_slug,
+    update_customer_form,
     update_form_config,
     update_business_profile,
     update_lead_status,
@@ -128,6 +137,167 @@ def test_demo_request_and_customer_lead_submissions_are_typed(tmp_path):
     }
 
 
+def test_customer_form_submission_stores_form_attribution_and_destination(tmp_path):
+    db_path = str(tmp_path / "attributed_inquiries.db")
+    form = create_customer_form(db_path, customer_form_input())
+
+    inquiry = create_demo_inquiry(
+        db_path,
+        {
+            "submission_type": "customer_lead",
+            "name": "Taylor Customer",
+            "phone": "555-101-2020",
+            "email": "taylor@example.com",
+            "business_name": "",
+            "service_type": "Estimate",
+            "message": "Please call me about service.",
+            "customer_form_id": form["id"],
+            "customer_form_slug": form["form_slug"],
+            "customer_form_client_name": form["client_business_name"],
+            "destination_email_used": form["destination_email"],
+        },
+    )
+
+    saved = list_demo_inquiries(db_path, limit=5)[0]
+
+    assert inquiry["customer_form_id"] == form["id"]
+    assert saved["customer_form_id"] == form["id"]
+    assert saved["customer_form_slug"] == "abc-plumbing"
+    assert saved["customer_form_client_name"] == "ABC Plumbing"
+    assert saved["destination_email_used"] == "abc@example.com"
+
+
+def test_inquiry_preserves_historical_destination_after_form_edit(tmp_path):
+    db_path = str(tmp_path / "historical_destination.db")
+    form = create_customer_form(db_path, customer_form_input())
+
+    create_demo_inquiry(
+        db_path,
+        {
+            "submission_type": "customer_lead",
+            "name": "Taylor Customer",
+            "phone": "555-101-2020",
+            "email": "taylor@example.com",
+            "business_name": "",
+            "service_type": "Estimate",
+            "message": "Please call me.",
+            "customer_form_id": form["id"],
+            "customer_form_slug": form["form_slug"],
+            "customer_form_client_name": form["client_business_name"],
+            "destination_email_used": "abc@example.com",
+        },
+    )
+    update_customer_form(db_path, form["id"], {"destination_email": "new-dispatch@example.com"})
+
+    saved = list_demo_inquiries(db_path, limit=5)[0]
+
+    assert saved["destination_email_used"] == "abc@example.com"
+
+
+def test_legacy_default_inquiry_and_old_schema_rows_are_null_safe(tmp_path):
+    db_path = str(tmp_path / "legacy_inquiries.db")
+
+    legacy = create_demo_inquiry(
+        db_path,
+        {
+            "submission_type": "customer_lead",
+            "name": "Legacy Customer",
+            "phone": "555-000-1111",
+            "email": "legacy@example.com",
+            "business_name": "",
+            "service_type": "Callback",
+            "message": "Old default form submission.",
+            "customer_form_slug": "lead",
+            "customer_form_client_name": "Default",
+            "destination_email_used": "owner@example.com",
+        },
+    )
+
+    assert legacy["customer_form_id"] is None
+    assert legacy["customer_form_slug"] == "lead"
+    assert legacy["customer_form_client_name"] == "Default"
+    assert legacy["destination_email_used"] == "owner@example.com"
+
+    old_db_path = str(tmp_path / "old_schema.db")
+    with sqlite3.connect(old_db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE demo_inquiries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                submission_type TEXT NOT NULL DEFAULT 'customer_lead',
+                name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT NOT NULL,
+                business_name TEXT NOT NULL,
+                service_type TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO demo_inquiries (
+                created_at, submission_type, name, phone, email, business_name, service_type, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-06-22T18:00:00+00:00",
+                "customer_lead",
+                "Old Customer",
+                "555",
+                "old@example.com",
+                "",
+                "Callback",
+                "Before attribution columns.",
+            ),
+        )
+        conn.commit()
+
+    old_rows = list_demo_inquiries(old_db_path, limit=5)
+
+    assert old_rows[0]["customer_form_id"] is None
+    assert old_rows[0]["customer_form_slug"] is None
+    assert old_rows[0]["customer_form_client_name"] is None
+    assert old_rows[0]["destination_email_used"] is None
+
+
+def test_list_demo_inquiries_can_filter_by_customer_form_slug(tmp_path):
+    db_path = str(tmp_path / "filter_inquiries.db")
+    first = create_customer_form(db_path, customer_form_input())
+    second = create_customer_form(
+        db_path,
+        customer_form_input(
+            client_business_name="Smith Roofing",
+            form_slug="smith-roofing",
+            destination_email="smith@example.com",
+        ),
+    )
+    for form in [first, second]:
+        create_demo_inquiry(
+            db_path,
+            {
+                "submission_type": "customer_lead",
+                "name": form["client_business_name"],
+                "phone": "555-101-2020",
+                "email": "lead@example.com",
+                "business_name": "",
+                "service_type": "Estimate",
+                "message": "Please call me.",
+                "customer_form_id": form["id"],
+                "customer_form_slug": form["form_slug"],
+                "customer_form_client_name": form["client_business_name"],
+                "destination_email_used": form["destination_email"],
+            },
+        )
+
+    filtered = list_demo_inquiries(db_path, limit=5, customer_form_slug="smith-roofing")
+
+    assert len(filtered) == 1
+    assert filtered[0]["customer_form_id"] == second["id"]
+    assert filtered[0]["customer_form_slug"] == "smith-roofing"
+
+
 def test_form_config_defaults_update_and_reset(tmp_path):
     db_path = str(tmp_path / "form_config.db")
 
@@ -158,6 +328,116 @@ def test_form_config_defaults_update_and_reset(tmp_path):
     reset = reset_form_config(db_path)
     assert reset["page_title"] == "Request a Follow-Up"
     assert reset["cta_button_text"] == "Send Request"
+
+
+def customer_form_input(**overrides):
+    data = {
+        "client_business_name": "ABC Plumbing",
+        "form_slug": "",
+        "destination_email": "abc@example.com",
+        "business_display_name": "ABC Plumbing",
+        "page_title": "Need Plumbing Help?",
+        "page_subtitle": "Fast callbacks for urgent jobs.",
+        "page_description": "Tell us what is going on and we will follow up.",
+        "form_header": "Request plumbing help",
+        "cta_button_text": "Send Plumbing Request",
+        "success_title": "Request received",
+        "success_body": "ABC Plumbing will follow up soon.",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_create_customer_form_generates_unique_slug_and_loads_by_slug(tmp_path):
+    db_path = str(tmp_path / "customer_forms.db")
+
+    form = create_customer_form(db_path, customer_form_input())
+    second = create_customer_form(
+        db_path,
+        customer_form_input(
+            client_business_name="ABC Plumbing",
+            destination_email="abc2@example.com",
+        ),
+    )
+
+    assert form["id"] > 0
+    assert form["form_slug"] == "abc-plumbing"
+    assert second["form_slug"] == "abc-plumbing-2"
+    assert form["destination_email"] == "abc@example.com"
+    assert get_customer_form_by_slug(db_path, "abc-plumbing")["page_title"] == "Need Plumbing Help?"
+    assert unique_customer_form_slug(db_path, "ABC Plumbing") == "abc-plumbing-3"
+
+
+def test_update_customer_form_preserves_record_and_blocks_duplicate_slug(tmp_path):
+    db_path = str(tmp_path / "customer_form_update.db")
+    first = create_customer_form(db_path, customer_form_input())
+    second = create_customer_form(
+        db_path,
+        customer_form_input(
+            client_business_name="Smith Roofing",
+            form_slug="smith-roofing",
+            destination_email="smith@example.com",
+            page_title="Roof repair request",
+        ),
+    )
+
+    updated = update_customer_form(
+        db_path,
+        first["id"],
+        {
+            "form_slug": "abc-plumbing-pro",
+            "destination_email": "dispatch@example.com",
+            "page_title": "Updated Plumbing Help",
+            "cta_button_text": "Get Help",
+        },
+    )
+
+    assert updated["id"] == first["id"]
+    assert updated["form_slug"] == "abc-plumbing-pro"
+    assert updated["destination_email"] == "dispatch@example.com"
+    assert updated["page_title"] == "Updated Plumbing Help"
+    assert get_customer_form_by_slug(db_path, "abc-plumbing-pro")["cta_button_text"] == "Get Help"
+
+    with pytest.raises(ValueError):
+        update_customer_form(db_path, second["id"], {"form_slug": "abc-plumbing-pro"})
+
+
+def test_customer_form_validation_and_inactive_lookup(tmp_path):
+    db_path = str(tmp_path / "customer_form_validation.db")
+
+    with pytest.raises(ValueError):
+        create_customer_form(db_path, customer_form_input(client_business_name=""))
+    with pytest.raises(ValueError):
+        create_customer_form(db_path, customer_form_input(destination_email="not-an-email"))
+
+    form = create_customer_form(db_path, customer_form_input())
+    archived = archive_customer_form(db_path, form["id"])
+
+    assert archived["is_active"] is False
+    assert get_customer_form_by_slug(db_path, form["form_slug"]) is None
+    assert get_customer_form_by_slug(db_path, form["form_slug"], include_inactive=True)["id"] == form["id"]
+
+
+def test_default_customer_form_falls_back_when_no_records_exist(tmp_path):
+    db_path = str(tmp_path / "default_customer_form.db")
+
+    default = get_default_customer_form_config(db_path)
+
+    assert default["form_slug"] == "lead"
+    assert default["page_title"] == "Request a Follow-Up"
+    assert list_customer_forms(db_path) == []
+
+
+def test_default_customer_form_stays_legacy_even_when_client_forms_exist(tmp_path):
+    db_path = str(tmp_path / "default_with_client_forms.db")
+    create_customer_form(db_path, customer_form_input())
+
+    default = get_default_customer_form_config(db_path)
+
+    assert default["id"] is None
+    assert default["form_slug"] == "lead"
+    assert default["client_business_name"] == "Default"
+    assert default["page_title"] == "Request a Follow-Up"
 
 
 def test_business_profile_slug_generation_and_duplicate_prevention(tmp_path):

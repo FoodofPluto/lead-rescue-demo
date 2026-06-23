@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+from io import StringIO
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,16 +22,22 @@ from lead_logic import (
     URGENCIES,
     VEHICLE_TYPES,
     priority_label,
+    looks_like_email,
     slugify,
 )
 from storage import (
+    archive_customer_form,
     business_lead_stats,
     create_business_profile,
+    create_customer_form,
     create_demo_inquiry,
     create_lead,
+    get_customer_form_by_slug,
+    get_default_customer_form_config,
     get_form_config,
     get_business_by_slug,
     get_business_profile,
+    list_customer_forms,
     list_demo_inquiries,
     list_business_profiles,
     list_leads,
@@ -37,7 +45,7 @@ from storage import (
     reset_form_config,
     restore_business_profile,
     soft_delete_business_profile,
-    update_form_config,
+    update_customer_form,
     update_business_profile,
     update_lead_status,
     update_owner_notes,
@@ -48,11 +56,73 @@ def copy_box(label: str, value: str, key: str, height: int = 150) -> None:
     st.text_area(label, value=value, height=height, key=key)
 
 
+def logout_operator_session() -> None:
+    st.session_state.pop("admin_authenticated", None)
+
+
+def is_honeypot_filled(value: str) -> bool:
+    return bool(str(value or "").strip())
+
+
+def render_honeypot_field(key: str) -> str:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stTextInput"]:has(input[aria-label="Website"]) {
+            display: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    return st.text_input(
+        "Website",
+        value="",
+        key=key,
+        label_visibility="collapsed",
+        autocomplete="off",
+    )
+
+
+def inquiry_export_rows(inquiries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "submitted": inquiry.get("created_at", ""),
+            "name": inquiry.get("name", ""),
+            "email": inquiry.get("email", ""),
+            "phone": inquiry.get("phone", ""),
+            "message": inquiry.get("message", ""),
+            "client_form_name": inquiry.get("customer_form_client_name") or "Legacy/default",
+            "form_slug": inquiry.get("customer_form_slug") or "Unknown",
+            "destination_email_used": inquiry.get("destination_email_used") or "",
+        }
+        for inquiry in inquiries
+    ]
+
+
+def inquiries_to_csv(inquiries: list[dict[str, Any]]) -> str:
+    output = StringIO()
+    fieldnames = [
+        "submitted",
+        "name",
+        "email",
+        "phone",
+        "message",
+        "client_form_name",
+        "form_slug",
+        "destination_email_used",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(inquiry_export_rows(inquiries))
+    return output.getvalue()
+
+
 def public_quote_link(settings, profile: dict[str, Any]) -> str:
     return f"{settings.app_base_url.rstrip('/')}/quote/{profile['public_slug']}"
 
 
-def public_follow_up_link(settings) -> str:
+def public_follow_up_link(settings, form_slug: str = "lead") -> str:
     base_url = settings.app_base_url.rstrip("/")
     if not settings.app_base_url_configured:
         context = getattr(st, "context", None)
@@ -60,7 +130,7 @@ def public_follow_up_link(settings) -> str:
         parsed = urlparse(url) if url else None
         if parsed and parsed.scheme and parsed.netloc:
             base_url = f"{parsed.scheme}://{parsed.netloc}"
-    return f"{base_url}/?form=lead"
+    return f"{base_url}/?form={slugify(form_slug) if form_slug else 'lead'}"
 
 
 def public_contact_link(settings) -> str:
@@ -96,9 +166,16 @@ def public_route_name(
         return "operator"
     if contact_value == "1":
         return "contact_form"
-    if form_value == "lead":
+    if form_value:
         return "customer_lead_form"
     return "homepage"
+
+
+def requested_customer_form_slug() -> str:
+    form_value = st.query_params.get("form")
+    if not form_value or form_value == "lead":
+        return ""
+    return slugify(str(form_value))
 
 
 def sequence_text(lead: dict[str, Any]) -> str:
@@ -192,10 +269,16 @@ def render_cta_demo_request_form(settings) -> None:
             business_name = st.text_input("Business name *")
             business_type = st.text_input("Business type or industry")
         message = st.text_area("What do you want help with?", height=132)
+        website = render_honeypot_field("cta_demo_request_website")
         submitted = st.form_submit_button("Request Demo", type="primary")
 
     if not submitted:
         return
+
+    if is_honeypot_filled(website):
+        st.session_state["cta_demo_request_email_results"] = []
+        st.session_state["cta_demo_request_submitted"] = True
+        st.rerun()
 
     required = {
         "Name": name,
@@ -232,22 +315,48 @@ def render_cta_demo_request_form(settings) -> None:
     st.rerun()
 
 
-def render_customer_lead_form(settings) -> None:
-    form_config = get_form_config(settings.database_path)
+def render_customer_lead_form(settings, form_slug: str = "") -> None:
+    if form_slug:
+        form_config = get_customer_form_by_slug(settings.database_path, form_slug)
+        if form_config is None:
+            render_form_unavailable(
+                "Customer form not found",
+                "This customer lead form does not exist or is currently inactive. Please check the link and try again.",
+            )
+            return
+    else:
+        form_config = get_default_customer_form_config(settings.database_path)
     st.caption(form_config["business_display_name"])
     st.title(form_config["page_title"])
     if form_config.get("page_subtitle"):
         st.subheader(form_config["page_subtitle"])
     st.write(form_config["page_description"])
 
-    if st.session_state.get("customer_lead_form_submitted"):
+    section_cols = st.columns(3)
+    sections = [
+        ("who_header", "who_body"),
+        ("problem_header", "problem_body"),
+        ("process_header", "process_body"),
+    ]
+    for column, (header_key, body_key) in zip(section_cols, sections):
+        with column:
+            if form_config.get(header_key):
+                st.markdown(f"**{form_config[header_key]}**")
+            if form_config.get(body_key):
+                st.write(form_config[body_key])
+    if form_config.get("value_message"):
+        st.info(form_config["value_message"])
+
+    submitted_key = f"customer_lead_form_submitted_{form_config.get('form_slug', 'lead')}"
+    results_key = f"customer_lead_email_results_{form_config.get('form_slug', 'lead')}"
+    if st.session_state.get(submitted_key):
         st.success(form_config["success_title"])
         st.write(form_config["success_body"])
-        for result in st.session_state.get("customer_lead_email_results", []):
+        for result in st.session_state.get(results_key, []):
             st.caption(result)
         if st.button("Send another request"):
-            st.session_state.pop("customer_lead_form_submitted", None)
-            st.session_state.pop("customer_lead_email_results", None)
+            st.session_state.pop(submitted_key, None)
+            st.session_state.pop(results_key, None)
             st.rerun()
         return
 
@@ -269,10 +378,16 @@ def render_customer_lead_form(settings) -> None:
                 placeholder=form_config["message_placeholder"],
                 height=132,
             )
+        website = render_honeypot_field(f"customer_lead_website_{form_config.get('form_slug', 'lead')}")
         submitted = st.form_submit_button(form_config["cta_button_text"], type="primary")
 
     if not submitted:
         return
+
+    if is_honeypot_filled(website):
+        st.session_state[results_key] = []
+        st.session_state[submitted_key] = True
+        st.rerun()
 
     fields = {
         "Name": name,
@@ -286,6 +401,18 @@ def render_customer_lead_form(settings) -> None:
         st.error("Please complete: " + ", ".join(missing))
         return
 
+    destination_email = (
+        form_config.get("destination_email")
+        or form_config.get("destination_owner_email")
+        or settings.owner_email
+    ).strip()
+    form_slug_for_storage = form_config.get("form_slug") or "lead"
+    client_name_for_storage = (
+        form_config.get("client_business_name")
+        or form_config.get("business_display_name")
+        or "Default"
+    )
+
     try:
         inquiry = create_demo_inquiry(
             settings.database_path,
@@ -297,6 +424,10 @@ def render_customer_lead_form(settings) -> None:
                 "service_type": service_type,
                 "message": message,
                 "submission_type": "customer_lead",
+                "customer_form_id": form_config.get("id"),
+                "customer_form_slug": form_slug_for_storage,
+                "customer_form_client_name": client_name_for_storage,
+                "destination_email_used": destination_email,
             },
         )
     except Exception as exc:
@@ -304,13 +435,179 @@ def render_customer_lead_form(settings) -> None:
         st.caption(f"Technical detail: {exc}")
         return
 
-    st.session_state["customer_lead_email_results"] = notify_for_customer_lead_request(
-        settings,
-        inquiry,
-        form_config.get("destination_owner_email", ""),
-    )
-    st.session_state["customer_lead_form_submitted"] = True
+    if not destination_email:
+        st.warning("Follow-up email not sent: this form does not have a destination email.")
+        email_results = ["Follow-up email not sent: this form does not have a destination email."]
+    elif not looks_like_email(destination_email):
+        st.warning("Follow-up email not sent: this form destination email is invalid.")
+        email_results = ["Follow-up email not sent: this form destination email is invalid."]
+    else:
+        email_results = notify_for_customer_lead_request(
+            settings,
+            inquiry,
+            destination_email,
+        )
+    st.session_state[results_key] = email_results
+    st.session_state[submitted_key] = True
     st.rerun()
+
+
+def customer_form_payload_from_fields(
+    client_business_name: str,
+    form_slug: str,
+    destination_email: str,
+    business_display_name: str,
+    page_title: str,
+    page_subtitle: str,
+    page_description: str,
+    who_header: str,
+    who_body: str,
+    problem_header: str,
+    problem_body: str,
+    process_header: str,
+    process_body: str,
+    value_message: str,
+    form_header: str,
+    form_help: str,
+    cta_button_text: str,
+    name_label: str,
+    phone_label: str,
+    email_label: str,
+    business_label: str,
+    service_label: str,
+    message_label: str,
+    message_placeholder: str,
+    success_title: str,
+    success_body: str,
+    is_active: bool,
+) -> dict[str, Any]:
+    return {
+        "client_business_name": client_business_name.strip(),
+        "form_slug": form_slug.strip() or client_business_name.strip(),
+        "destination_email": destination_email.strip(),
+        "business_display_name": business_display_name.strip() or client_business_name.strip(),
+        "page_title": page_title.strip(),
+        "page_subtitle": page_subtitle.strip(),
+        "page_description": page_description.strip(),
+        "who_header": who_header.strip(),
+        "who_body": who_body.strip(),
+        "problem_header": problem_header.strip(),
+        "problem_body": problem_body.strip(),
+        "process_header": process_header.strip(),
+        "process_body": process_body.strip(),
+        "value_message": value_message.strip(),
+        "form_header": form_header.strip(),
+        "form_help": form_help.strip(),
+        "cta_button_text": cta_button_text.strip(),
+        "name_label": name_label.strip(),
+        "phone_label": phone_label.strip(),
+        "email_label": email_label.strip(),
+        "business_label": business_label.strip(),
+        "service_label": service_label.strip(),
+        "message_label": message_label.strip(),
+        "message_placeholder": message_placeholder.strip(),
+        "success_title": success_title.strip(),
+        "success_body": success_body.strip(),
+        "is_active": is_active,
+    }
+
+
+def render_customer_form_editor(settings, form_config: dict[str, Any] | None = None) -> None:
+    is_edit = form_config is not None
+    defaults = {**get_form_config(settings.database_path), **(form_config or {})}
+    defaults.setdefault("client_business_name", defaults.get("business_display_name", ""))
+    defaults.setdefault("form_slug", slugify(defaults.get("client_business_name", "")))
+    defaults.setdefault("destination_email", defaults.get("destination_owner_email", ""))
+    defaults.setdefault("is_active", True)
+
+    with st.form(f"customer_form_record_{defaults.get('id', 'new')}"):
+        st.subheader("Edit Customer-Facing Form" if is_edit else "Create Customer-Facing Form")
+        meta_cols = st.columns(2)
+        with meta_cols[0]:
+            client_business_name = st.text_input("Client/business name *", value=defaults["client_business_name"])
+            form_slug = st.text_input("Unique form slug", value=defaults["form_slug"])
+            destination_email = st.text_input("Destination email *", value=defaults["destination_email"])
+        with meta_cols[1]:
+            business_display_name = st.text_input("Business display name", value=defaults["business_display_name"])
+            is_active = st.checkbox("Active public form", value=bool(defaults.get("is_active", True)))
+
+        page_title = st.text_input("Form title", value=defaults["page_title"])
+        page_subtitle = st.text_area("Subtitle/description line", value=defaults["page_subtitle"], height=70)
+        page_description = st.text_area("Intro paragraph", value=defaults["page_description"], height=90)
+
+        section_cols = st.columns(3)
+        with section_cols[0]:
+            who_header = st.text_input("Section 1 header", value=defaults["who_header"])
+            who_body = st.text_area("Section 1 body", value=defaults["who_body"], height=120)
+        with section_cols[1]:
+            problem_header = st.text_input("Section 2 header", value=defaults["problem_header"])
+            problem_body = st.text_area("Section 2 body", value=defaults["problem_body"], height=120)
+        with section_cols[2]:
+            process_header = st.text_input("Section 3 header", value=defaults["process_header"])
+            process_body = st.text_area("Section 3 body", value=defaults["process_body"], height=120)
+        value_message = st.text_area("Value message", value=defaults["value_message"], height=80)
+
+        form_header = st.text_input("Form title shown above fields", value=defaults["form_header"])
+        form_help = st.text_area("Form helper text", value=defaults["form_help"], height=80)
+        cta_button_text = st.text_input("CTA/button text", value=defaults["cta_button_text"])
+
+        label_cols = st.columns(2)
+        with label_cols[0]:
+            name_label = st.text_input("Name field label", value=defaults["name_label"])
+            phone_label = st.text_input("Phone field label", value=defaults["phone_label"])
+            email_label = st.text_input("Email field label", value=defaults["email_label"])
+        with label_cols[1]:
+            business_label = st.text_input("Company/business field label", value=defaults["business_label"])
+            service_label = st.text_input("Service/request type field label", value=defaults["service_label"])
+            message_label = st.text_input("Message field label", value=defaults["message_label"])
+            message_placeholder = st.text_input("Message placeholder", value=defaults["message_placeholder"])
+
+        success_title = st.text_input("Thank-you message title", value=defaults["success_title"])
+        success_body = st.text_area("Thank-you message body", value=defaults["success_body"], height=80)
+        saved = st.form_submit_button("Save Customer Form", type="primary")
+
+    if not saved:
+        return
+
+    payload = customer_form_payload_from_fields(
+        client_business_name,
+        form_slug,
+        destination_email,
+        business_display_name,
+        page_title,
+        page_subtitle,
+        page_description,
+        who_header,
+        who_body,
+        problem_header,
+        problem_body,
+        process_header,
+        process_body,
+        value_message,
+        form_header,
+        form_help,
+        cta_button_text,
+        name_label,
+        phone_label,
+        email_label,
+        business_label,
+        service_label,
+        message_label,
+        message_placeholder,
+        success_title,
+        success_body,
+        is_active,
+    )
+    try:
+        if is_edit:
+            saved_form = update_customer_form(settings.database_path, int(form_config["id"]), payload)
+        else:
+            saved_form = create_customer_form(settings.database_path, payload)
+        st.session_state["selected_customer_form_id"] = saved_form["id"]
+        st.success(f"Saved {saved_form['client_business_name']} with slug `{saved_form['form_slug']}`.")
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 
 
 def render_public_form(settings, profile: dict[str, Any] | None) -> None:
@@ -777,101 +1074,90 @@ def render_setup_checklist(settings) -> None:
 
 def render_lead_form_setup(settings) -> None:
     st.title("Customer Lead Form Setup")
-    st.write("Edit the customer-facing form, verify email forwarding, and copy the shareable form link.")
-    st.caption("This is the form your customers will see when you send them the public link.")
+    st.write("Create, edit, and manage client-specific customer lead forms.")
     if not operator_unlocked(settings):
         return
 
-    form_config = get_form_config(settings.database_path)
-    public_link = public_follow_up_link(settings)
+    customer_forms = list_customer_forms(settings.database_path)
+    selected_form = None
+    if customer_forms:
+        selected_id = st.session_state.get("selected_customer_form_id", customer_forms[0]["id"])
+        if selected_id not in {form["id"] for form in customer_forms}:
+            selected_id = customer_forms[0]["id"]
+        selected_form = next(form for form in customer_forms if form["id"] == selected_id)
+        public_link = public_follow_up_link(settings, selected_form["form_slug"])
 
-    st.markdown("**Shareable Customer Form Link**")
-    st.text_input("Copy shareable form link", value=public_link, key="public_follow_up_link")
-    st.link_button("Open customer form", public_link)
-    if not settings.app_base_url_configured:
-        st.warning("APP_BASE_URL is not set. Set it before deploying so hosted share links use the correct public URL.")
-
-    copy_box(
-        "Client posting copy",
-        (
-            f"Website button: Request a Follow-Up\n\n"
-            f"Instagram bio: Need service or a callback? {public_link}\n\n"
-            f"Facebook or Google Business Profile: Need service, a quote, booking help, or a follow-up? "
-            f"Send your details here: {public_link}\n\n"
-            f"Text reply: Thanks for reaching out. Please send your details here so we can follow up: {public_link}"
-        ),
-        "public_form_posting_copy",
-        180,
-    )
-
-    st.subheader("Edit Customer-Facing Form")
-    with st.form("lead_form_config"):
-        business_display_name = st.text_input("Business display name", value=form_config["business_display_name"])
-        page_title = st.text_input("Form title", value=form_config["page_title"])
-        page_subtitle = st.text_area("Subtitle/description line", value=form_config["page_subtitle"], height=70)
-        page_description = st.text_area("Intro paragraph", value=form_config["page_description"], height=90)
-
-        form_header = st.text_input("Form title shown above fields", value=form_config["form_header"])
-        form_help = st.text_area("Form helper text", value=form_config["form_help"], height=80)
-        cta_button_text = st.text_input("CTA/button text", value=form_config["cta_button_text"])
-
-        label_cols = st.columns(2)
-        with label_cols[0]:
-            name_label = st.text_input("Name field label", value=form_config["name_label"])
-            phone_label = st.text_input("Phone field label", value=form_config["phone_label"])
-            email_label = st.text_input("Email field label", value=form_config["email_label"])
-        with label_cols[1]:
-            business_label = st.text_input("Company/business field label", value=form_config["business_label"])
-            service_label = st.text_input("Service/request type field label", value=form_config["service_label"])
-            message_label = st.text_input("Message field label", value=form_config["message_label"])
-            message_placeholder = st.text_input("Message placeholder", value=form_config["message_placeholder"])
-
-        success_title = st.text_input("Thank-you message title", value=form_config["success_title"])
-        success_body = st.text_area("Thank-you message body", value=form_config["success_body"], height=80)
-        destination_owner_email = st.text_input(
-            "Destination email for follow-up requests",
-            value=form_config.get("destination_owner_email", ""),
-            help="Leave blank to use OWNER_EMAIL from .env or hosted secrets.",
-        )
-        saved = st.form_submit_button("Save Lead Form Settings", type="primary")
-
-    if saved:
-        update_form_config(
-            settings.database_path,
+        rows = [
             {
-                "business_display_name": business_display_name,
-                "page_title": page_title,
-                "page_subtitle": page_subtitle,
-                "page_description": page_description,
-                "form_header": form_header,
-                "form_help": form_help,
-                "cta_button_text": cta_button_text,
-                "name_label": name_label,
-                "phone_label": phone_label,
-                "email_label": email_label,
-                "business_label": business_label,
-                "service_label": service_label,
-                "message_label": message_label,
-                "message_placeholder": message_placeholder,
-                "success_title": success_title,
-                "success_body": success_body,
-                "destination_owner_email": destination_owner_email,
-            },
-        )
-        st.success("Customer lead form settings saved.")
-        st.rerun()
+                "Client/business": form["client_business_name"],
+                "Slug": form["form_slug"],
+                "Shareable URL": public_follow_up_link(settings, form["form_slug"]),
+                "Destination email": form["destination_email"],
+                "Active": form["is_active"],
+                "Last updated": form["updated_at"],
+            }
+            for form in customer_forms
+        ]
+        st.subheader("Saved Customer Lead Forms")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    if st.button("Reset customer lead form copy to defaults"):
-        reset_form_config(settings.database_path)
-        st.success("Customer lead form settings reset.")
-        st.rerun()
+        selected_id = st.selectbox(
+            "Edit saved form",
+            [form["id"] for form in customer_forms],
+            index=[form["id"] for form in customer_forms].index(selected_form["id"]),
+            format_func=lambda form_id: next(
+                f"{form['client_business_name']} ({form['form_slug']})"
+                for form in customer_forms
+                if form["id"] == form_id
+            ),
+        )
+        st.session_state["selected_customer_form_id"] = selected_id
+        selected_form = next(form for form in customer_forms if form["id"] == selected_id)
+        public_link = public_follow_up_link(settings, selected_form["form_slug"])
+
+        st.markdown("**Shareable Customer Form Link**")
+        st.text_input("Copy shareable form link", value=public_link, key=f"public_follow_up_link_{selected_form['id']}")
+        st.link_button("Open customer form", public_link)
+        if not settings.app_base_url_configured:
+            st.warning("APP_BASE_URL is not set. Set it before deploying so hosted share links use the correct public URL.")
+
+        copy_box(
+            "Client posting copy",
+            (
+                f"Website button: Request a Follow-Up\n\n"
+                f"Instagram bio: Need service or a callback? {public_link}\n\n"
+                f"Facebook or Google Business Profile: Need service, a quote, booking help, or a follow-up? "
+                f"Send your details here: {public_link}\n\n"
+                f"Text reply: Thanks for reaching out. Please send your details here so we can follow up: {public_link}"
+            ),
+            f"public_form_posting_copy_{selected_form['id']}",
+            180,
+        )
+
+        if st.button("Archive selected form", type="secondary"):
+            archived = archive_customer_form(settings.database_path, selected_form["id"])
+            st.success(f"Archived {archived['client_business_name']}.")
+            st.rerun()
+    else:
+        st.info("No saved customer lead forms yet. Create one below.")
+
+    edit_tab, create_tab = st.tabs(["Edit Selected Form", "Create New Form"])
+    with edit_tab:
+        if selected_form:
+            render_customer_form_editor(settings, selected_form)
+        else:
+            st.info("Create a customer form first.")
+    with create_tab:
+        render_customer_form_editor(settings)
 
     st.subheader("Email Test")
-    test_recipient = (form_config.get("destination_owner_email") or settings.owner_email).strip()
+    test_recipient = (selected_form.get("destination_email", "") if selected_form else "").strip()
     st.write(f"Current recipient: `{test_recipient or 'not configured'}`")
     if st.button("Send Test Email"):
         if not test_recipient:
-            st.error("Set OWNER_EMAIL or the destination email above before sending a test.")
+            st.error("Set the selected form destination email before sending a test.")
+        elif not looks_like_email(test_recipient):
+            st.error("The selected form destination email is invalid.")
         else:
             sent, message = send_email(
                 settings,
@@ -884,10 +1170,44 @@ def render_lead_form_setup(settings) -> None:
             else:
                 st.warning(message)
 
-    recent = list_demo_inquiries(settings.database_path, limit=10)
+    with st.expander("Legacy default form fallback"):
+        st.write("The old `?form=lead` link still loads a default customer-facing form for compatibility.")
+        if st.button("Reset legacy default customer lead form copy"):
+            reset_form_config(settings.database_path)
+            st.success("Legacy default customer lead form settings reset.")
+            st.rerun()
+
+    filter_slug = None
+    if customer_forms:
+        filter_options = ["All forms"] + [form["form_slug"] for form in customer_forms]
+        selected_filter = st.selectbox("Filter recent requests by form", filter_options)
+        if selected_filter != "All forms":
+            filter_slug = selected_filter
+
+    recent = list_demo_inquiries(settings.database_path, limit=10, customer_form_slug=filter_slug)
     st.subheader("Recent Customer Follow-Up Requests")
     if recent:
-        st.dataframe(recent, use_container_width=True, hide_index=True)
+        recent_rows = [
+            {
+                "Submitted": inquiry["created_at"],
+                "Client/form": inquiry.get("customer_form_client_name") or "Legacy/default",
+                "Form slug": inquiry.get("customer_form_slug") or "Unknown",
+                "Destination email used": inquiry.get("destination_email_used") or "",
+                "Name": inquiry["name"],
+                "Phone": inquiry["phone"],
+                "Email": inquiry["email"],
+                "Service/request": inquiry["service_type"],
+                "Message": inquiry["message"],
+            }
+            for inquiry in recent
+        ]
+        st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Export recent requests CSV",
+            data=inquiries_to_csv(recent),
+            file_name="lead-rescue-recent-requests.csv",
+            mime="text/csv",
+        )
     else:
         st.info("No follow-up requests submitted yet.")
 
@@ -896,6 +1216,10 @@ def render_sidebar(settings) -> str:
     with st.sidebar:
         st.header("Lead Rescue AI")
         st.caption("Operator-managed lead form generator")
+        if st.session_state.get("admin_authenticated"):
+            if st.button("Log out Operator"):
+                logout_operator_session()
+                st.rerun()
         page = st.radio(
             "Operator View",
             ["Customer Lead Form Setup", "Business Profiles", "Detailing Leads", "Pilot Setup Checklist"],
@@ -927,7 +1251,7 @@ def main() -> None:
         st.query_params.get("contact"),
     )
     if route == "customer_lead_form":
-        render_customer_lead_form(settings)
+        render_customer_lead_form(settings, requested_customer_form_slug())
         return
     if route == "contact_form":
         render_cta_demo_request_form(settings)

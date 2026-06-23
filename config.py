@@ -53,11 +53,12 @@ def env_value(key: str, default: str = "") -> str:
 def get_settings() -> Settings:
     load_dotenv()
     app_base_url = env_value("APP_BASE_URL", "http://localhost:8501")
+    default_destination_email = env_value("DEFAULT_DESTINATION_EMAIL", "")
     return Settings(
         app_base_url=app_base_url,
         app_base_url_configured=bool(env_value("APP_BASE_URL", "")),
         admin_password=env_value("ADMIN_PASSWORD", ""),
-        owner_email=env_value("OWNER_EMAIL", ""),
+        owner_email=env_value("OWNER_EMAIL", default_destination_email),
         email_provider=env_value("EMAIL_PROVIDER", "disabled").lower(),
         from_email=env_value("FROM_EMAIL", "Lead Rescue AI <noreply@example.com>"),
         resend_api_key=env_value("RESEND_API_KEY", ""),

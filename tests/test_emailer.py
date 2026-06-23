@@ -9,6 +9,7 @@ from emailer import (
     customer_lead_request_subject,
     demo_inquiry_body,
     demo_inquiry_subject,
+    notify_for_customer_lead_request,
     owner_email_body,
     profile_owner_email,
 )
@@ -90,6 +91,9 @@ def test_demo_inquiry_email_includes_all_submitted_details():
         "business_name": "Morgan Mobile Detail",
         "service_type": "Estimate",
         "message": "We need a callback link.",
+        "customer_form_client_name": "ABC Plumbing",
+        "customer_form_slug": "abc-plumbing",
+        "destination_email_used": "abc@example.com",
         "created_at": "2026-06-22T18:00:00+00:00",
     }
     body = demo_inquiry_body(inquiry, "http://localhost:8501?admin=1")
@@ -104,6 +108,9 @@ def test_demo_inquiry_email_includes_all_submitted_details():
     assert "Morgan Mobile Detail" in body
     assert "Estimate" in body
     assert "We need a callback link." in body
+    assert "ABC Plumbing" in body
+    assert "abc-plumbing" in body
+    assert "abc@example.com" in body
     assert "http://localhost:8501?admin=1" in body
 
 
@@ -148,3 +155,51 @@ def test_resend_request_includes_required_headers_and_payload():
         "subject": "New Customer Lead Request",
         "text": "Lead details",
     }
+
+
+def test_customer_lead_notification_uses_form_destination_email(monkeypatch):
+    sent = {}
+
+    def fake_send_email(settings, to_email, subject, body):
+        sent["to_email"] = to_email
+        sent["subject"] = subject
+        sent["body"] = body
+        return True, "sent"
+
+    monkeypatch.setattr("emailer.send_email", fake_send_email)
+    inquiry = {
+        "submission_type": "customer_lead",
+        "name": "Taylor",
+        "phone": "555",
+        "email": "taylor@example.com",
+        "business_name": "",
+        "service_type": "Repair",
+        "message": "Need help",
+        "created_at": "2026-06-22T18:00:00+00:00",
+    }
+    configured = resend_settings()
+
+    result = notify_for_customer_lead_request(configured, inquiry, "abc@example.com")
+
+    assert result == ["sent"]
+    assert sent["to_email"] == "abc@example.com"
+    assert sent["subject"] == "New Customer Lead Request"
+
+
+def test_customer_lead_notification_rejects_missing_or_invalid_destination():
+    inquiry = {
+        "submission_type": "customer_lead",
+        "name": "Taylor",
+        "phone": "555",
+        "email": "taylor@example.com",
+        "business_name": "",
+        "service_type": "Repair",
+        "message": "Need help",
+    }
+
+    assert notify_for_customer_lead_request(resend_settings(), inquiry, "") == [
+        "Follow-up email not sent: form destination email is missing."
+    ]
+    assert notify_for_customer_lead_request(resend_settings(), inquiry, "bad-email") == [
+        "Follow-up email not sent: form destination email is invalid."
+    ]
