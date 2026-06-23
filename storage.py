@@ -702,6 +702,8 @@ def create_demo_inquiry(db_path: str, data: dict[str, Any]) -> dict[str, Any]:
     missing = [label for label, value in required.items() if not value]
     if missing:
         raise ValueError("Missing required fields: " + ", ".join(missing))
+    if not looks_like_email(cleaned["email"]):
+        raise ValueError("Email must be a valid email address.")
 
     created_at = utc_now_iso()
     with connect(db_path) as conn:

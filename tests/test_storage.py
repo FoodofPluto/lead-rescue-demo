@@ -80,6 +80,18 @@ def test_create_demo_inquiry_requires_contact_and_business_details(tmp_path):
                 "message": "Missing name should be rejected.",
             },
         )
+    with pytest.raises(ValueError):
+        create_demo_inquiry(
+            db_path,
+            {
+                "name": "Morgan Owner",
+                "phone": "555-200-3030",
+                "email": "not-an-email",
+                "business_name": "Morgan Mobile Detail",
+                "service_type": "Callback request",
+                "message": "Bad email should be rejected.",
+            },
+        )
 
 
 def test_create_demo_inquiry_allows_optional_company_name(tmp_path):

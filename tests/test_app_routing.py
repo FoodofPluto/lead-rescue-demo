@@ -6,6 +6,8 @@ from app import (
     inquiry_export_rows,
     is_honeypot_filled,
     logout_operator_session,
+    looks_like_email,
+    operator_unlocked,
     public_contact_link,
     public_follow_up_link,
     public_route_name,
@@ -38,6 +40,11 @@ def test_form_lead_route_uses_customer_form_not_homepage():
     assert public_route_name(None, None, "1") == "contact_form"
     assert public_route_name(None, None) == "homepage"
     assert public_route_name("lead", "1") == "operator"
+
+
+def test_app_import_exposes_email_validator():
+    assert looks_like_email("owner@example.com") is True
+    assert looks_like_email("not-an-email") is False
 
 
 def test_public_homepage_copy_does_not_expose_admin_route():
@@ -110,3 +117,41 @@ def test_logout_operator_session_clears_auth(monkeypatch):
     logout_operator_session()
 
     assert "admin_authenticated" not in state
+
+
+def test_operator_unlocked_requires_configured_admin_password(monkeypatch):
+    calls = []
+
+    class FakeStreamlit:
+        session_state = {}
+
+        @staticmethod
+        def error(message):
+            calls.append(("error", message))
+
+        @staticmethod
+        def write(message):
+            calls.append(("write", message))
+
+        @staticmethod
+        def code(value, language=None):
+            calls.append(("code", value, language))
+
+    locked_settings = Settings(
+        app_base_url="https://lead-rescue.example",
+        app_base_url_configured=True,
+        admin_password="",
+        owner_email="owner@example.com",
+        email_provider="disabled",
+        from_email="Lead Rescue <noreply@example.com>",
+        resend_api_key="",
+        smtp_host="",
+        smtp_port=587,
+        smtp_username="",
+        smtp_password="",
+        database_path=":memory:",
+    )
+    monkeypatch.setattr("app.st", FakeStreamlit)
+
+    assert operator_unlocked(locked_settings) is False
+    assert ("error", "Operator area is locked.") in calls

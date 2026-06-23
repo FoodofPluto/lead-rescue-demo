@@ -3,6 +3,7 @@ from lead_logic import (
     generate_customer_confirmation,
     generate_follow_up_sequence,
     generate_next_action,
+    looks_like_email,
     prepare_lead,
     score_lead,
     slugify,
@@ -30,6 +31,29 @@ def lead_input(**overrides):
 def test_slugify_creates_url_safe_slug():
     assert slugify("Vinton Auto Detail!") == "vinton-auto-detail"
     assert slugify("  Blue   Ridge Mobile Detailing  ") == "blue-ridge-mobile-detailing"
+
+
+def test_looks_like_email_accepts_normal_addresses():
+    assert looks_like_email("owner@example.com") is True
+    assert looks_like_email(" owner+booking@example.co ") is True
+
+
+def test_looks_like_email_rejects_blank_and_malformed_values():
+    invalid_addresses = [
+        "",
+        "   ",
+        "not-an-email",
+        "@example.com",
+        "owner@",
+        "owner@example",
+        "owner@@example.com",
+        "owner example@example.com",
+        "owner@example..com",
+        "owner@example.com.",
+    ]
+
+    for address in invalid_addresses:
+        assert looks_like_email(address) is False
 
 
 def test_hot_complete_lead_scores_higher_than_pricing_lead():

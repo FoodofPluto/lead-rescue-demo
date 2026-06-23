@@ -291,6 +291,9 @@ def render_cta_demo_request_form(settings) -> None:
     if missing:
         st.error("Please complete: " + ", ".join(missing))
         return
+    if not looks_like_email(email):
+        st.error("Please enter a valid email address.")
+        return
 
     try:
         inquiry = create_demo_inquiry(
@@ -399,6 +402,9 @@ def render_customer_lead_form(settings, form_slug: str = "") -> None:
     missing = [label for label, value in fields.items() if not value.strip()]
     if missing:
         st.error("Please complete: " + ", ".join(missing))
+        return
+    if not looks_like_email(email):
+        st.error("Please enter a valid email address.")
         return
 
     destination_email = (
@@ -809,7 +815,7 @@ def render_business_manager(settings) -> None:
             }
         )
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     else:
         st.info("No business profiles yet. Create your first profile to generate a public quote form link.")
 
@@ -824,7 +830,7 @@ def render_business_manager(settings) -> None:
             }
             for profile in deleted_profiles
         ]
-        st.dataframe(deleted_rows, use_container_width=True, hide_index=True)
+        st.dataframe(deleted_rows, width="stretch", hide_index=True)
         restore_id = st.selectbox(
             "Restore deleted profile",
             [profile["id"] for profile in deleted_profiles],
@@ -1006,7 +1012,7 @@ def render_operator_dashboard(settings) -> None:
         }
         for lead in leads
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
     selected_lead_id = st.selectbox(
         "View lead details",
@@ -1099,7 +1105,7 @@ def render_lead_form_setup(settings) -> None:
             for form in customer_forms
         ]
         st.subheader("Saved Customer Lead Forms")
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
         selected_id = st.selectbox(
             "Edit saved form",
@@ -1201,7 +1207,7 @@ def render_lead_form_setup(settings) -> None:
             }
             for inquiry in recent
         ]
-        st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+        st.dataframe(recent_rows, width="stretch", hide_index=True)
         st.download_button(
             "Export recent requests CSV",
             data=inquiries_to_csv(recent),

@@ -61,7 +61,21 @@ def slugify(value: str) -> str:
 
 
 def looks_like_email(value: str) -> bool:
-    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value.strip()))
+    email = (value or "").strip()
+    if not email or any(char.isspace() for char in email):
+        return False
+    if email.count("@") != 1:
+        return False
+
+    local_part, domain = email.split("@", 1)
+    if not local_part or not domain or "." not in domain:
+        return False
+    if local_part.startswith(".") or local_part.endswith("."):
+        return False
+    if domain.startswith(".") or domain.endswith(".") or ".." in domain:
+        return False
+
+    return all(label for label in domain.split("."))
 
 
 def score_lead(data: dict[str, str]) -> int:
